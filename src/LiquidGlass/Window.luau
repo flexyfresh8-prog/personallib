@@ -645,11 +645,15 @@ function Window:_setupResize(cfg)
         local minW = Config.Window.MinSize.X + M * 2
         local minH = Config.Window.MinSize.Y + M * 2
 
-        local function grip(width, height, anchor, position, cursor)
+        -- NOTE: signature is (size, anchor, position, cursor). An earlier version
+        -- declared (width, height, anchor, position, cursor) while call sites passed
+        -- a full UDim2 size + Vector2 anchor — indexing `.Scale` on a UDim2 crashes
+        -- real clients ("Scale is not a valid member of UDim2").
+        local function grip(size, anchor, position, cursor)
                 local g = Util.New("Frame", {
                         Name = "ResizeGrip",
                         BackgroundTransparency = 1,
-                        Size = UDim2.new(width.Scale, width.Offset, height.Scale, height.Offset),
+                        Size = size,
                         AnchorPoint = anchor,
                         Position = position,
                         ZIndex = 8,
