@@ -21,6 +21,14 @@
                Range, Cooldown, Burst Count, Charge, Sprint Attacks, Always
                Crit, Humanize Timing + Jitter %, Aim Precision, Require
                Facing, Auto Swing, Live Stats (Attacks Fired / Targets in Range)
+      AI Play: One-toggle hunting AI - picks the closest player, draws a live
+               target line, routes around obstacles with PathfindingService
+               (white path line bends as it recalculates), aimbot-locks the
+               camera on the target and walks you in with simulated WASD.
+               Move modes: WASD Keys (VirtualUser) / MoveVector (ControlModule)
+               / MoveTo, with automatic fallback if keys don't move you.
+               Auto jump, stuck detection, stop distance, search range,
+               repath delay, blacklist, live status panel, V hotkey.
       Dodge:   Auto Dodge (G) + Range/Mode/Cooldown, Low HP Alert + Threshold
       Visuals: Target Highlight (Filled/Outline), Range Ring, Visual Color
       Settings: Anti-AFK, Unload
@@ -32,6 +40,7 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local PathfindingService = game:GetService("PathfindingService")
 
 local player = Players.LocalPlayer
 
@@ -126,6 +135,29 @@ local lowHPThreshold = 30
 local lowHPNotified = false
 local antiAFK = false
 local antiAFKConn = nil
+
+-- AI Play state
+local aiPlayOn = false
+local aiDrawLine = true
+local aiShowPath = true
+local aiAimbot = true
+local aiAimPart = "Head"
+local aiAimSmooth = 0.3
+local aiPathfind = true
+local aiMoveMode = "WASD Keys"      -- WASD Keys | MoveVector | MoveTo
+local aiAutoJump = true
+local aiStopRange = 6
+local aiSearchRange = 150
+local aiRepath = 1
+local aiTarget = nil                -- current AI target character
+local aiCleanup = nil               -- assigned by the AI engine at the bottom
+local blacklist = {}                -- lowercase username set
+local function updateBlacklist(text)
+    blacklist = {}
+    for token in string.gmatch(tostring(text or ""), "[^,%s]+") do
+        blacklist[string.lower(token)] = true
+    end
+end
 
 -- ================================================================ visuals ====
 local ring = nil
@@ -1268,6 +1300,163 @@ VisualsTab:CreateColorPicker({
     end,
 })
 
+-- ================================================================ AI Play tab ====
+local AITab = Window:CreateTab({ name = "AI Play" })
+
+local function setAIPlay(state)
+    aiPlayOn = state
+    if state then
+        -- hunting is pointless without attacking: auto-enable Auto Attack
+        if not autoAttackOn and autoToggleCtl then
+            autoAttackOn = true
+            pcall(function() autoToggleCtl:Set(true, true) end)
+        end
+        notify("AI Play ON", "Hunting the closest player. Line + path + aimbot active.", "swords")
+    else
+        if aiCleanup then pcall(aiCleanup) end
+        notify("AI Play OFF", "Navigation stopped", "circle")
+    end
+    burstAtWindowCenter()
+end
+
+AITab:CreateSection({ name = "AI PLAY" })
+
+local aiToggleCtl
+aiToggleCtl = AITab:CreateToggle({
+    name = "AI Play",
+    description = "Finds the closest player, draws a line to them, routes around obstacles, aimbot-locks your camera and walks you in with simulated WASD. Auto-enables Auto Attack.",
+    value = false,
+    callback = setAIPlay,
+})
+
+AITab:CreateToggle({
+    name = "Draw Target Line",
+    description = "Live pink beam from you to the current target",
+    value = aiDrawLine,
+    callback = function(s) aiDrawLine = s; burstAtWindowCenter() end,
+})
+
+AITab:CreateToggle({
+    name = "Show Path Line",
+    description = "White beam that bends around obstacles as the path recalculates",
+    value = aiShowPath,
+    callback = function(s) aiShowPath = s; burstAtWindowCenter() end,
+})
+
+AITab:CreateToggle({
+    name = "Aimbot",
+    description = "Smoothly locks your camera onto the target",
+    value = aiAimbot,
+    callback = function(s) aiAimbot = s end,
+})
+
+AITab:CreateDropdown({
+    name = "Aim Part",
+    description = "Body part the camera locks onto",
+    options = { "Head", "HumanoidRootPart" },
+    value = { aiAimPart },
+    callback = function(selected)
+        local p = selected
+        if type(selected) == "table" then p = selected[1] end
+        if p then aiAimPart = p end
+    end,
+})
+
+AITab:CreateSlider({
+    name = "Aim Smoothness",
+    description = "0.05 = heavy smoothing, 1 = instant snap",
+    range = { 0.05, 1 },
+    value = aiAimSmooth,
+    callback = function(v) aiAimSmooth = v end,
+})
+
+AITab:CreateSection({ name = "NAVIGATION" })
+
+AITab:CreateToggle({
+    name = "Obstacle Routing",
+    description = "Pathfind around walls and gaps instead of walking straight",
+    value = aiPathfind,
+    callback = function(s) aiPathfind = s end,
+})
+
+local aiMoveModeCtl
+aiMoveModeCtl = AITab:CreateDropdown({
+    name = "Move Mode",
+    description = "WASD Keys = simulated key presses (auto-falls back to MoveVector if keys don't move you)",
+    options = { "WASD Keys", "MoveVector", "MoveTo" },
+    value = { aiMoveMode },
+    callback = function(selected)
+        local m = selected
+        if type(selected) == "table" then m = selected[1] end
+        if m then aiMoveMode = m end
+    end,
+})
+
+AITab:CreateToggle({
+    name = "Auto Jump",
+    description = "Jump when the path says to or when stuck",
+    value = aiAutoJump,
+    callback = function(s) aiAutoJump = s end,
+})
+
+AITab:CreateSlider({
+    name = "Stop Distance (studs)",
+    description = "Stop walking once this close to the target",
+    range = { 3, 20 },
+    value = aiStopRange,
+    callback = function(v) aiStopRange = v end,
+})
+
+AITab:CreateSlider({
+    name = "Search Range (studs)",
+    description = "How far the AI looks for the closest player",
+    range = { 50, 500 },
+    value = aiSearchRange,
+    callback = function(v) aiSearchRange = math.floor(v) end,
+})
+
+AITab:CreateSlider({
+    name = "Repath Delay (s)",
+    description = "Seconds between path recalculations",
+    range = { 0.3, 3 },
+    value = aiRepath,
+    callback = function(v) aiRepath = v end,
+})
+
+AITab:CreateSection({ name = "FILTERS" })
+
+pcall(function()
+    AITab:CreateInput({
+        name = "Blacklist", Name = "Blacklist",
+        description = "Players the AI (and Auto Attack) will never target",
+        placeholder = "player1, player2", PlaceholderText = "player1, player2",
+        removeTextAfterFocusLost = false, RemoveTextAfterFocusLost = false,
+        callback = function(text) updateBlacklist(text) end,
+        Callback = function(text) updateBlacklist(text) end,
+    })
+end)
+
+AITab:CreateKeybind({
+    name = "AI Play Hotkey",
+    description = "Press to flip AI Play on/off",
+    value = Enum.KeyCode.V,
+    callback = function()
+        setAIPlay(not aiPlayOn)
+        if aiToggleCtl then pcall(function() aiToggleCtl:Set(aiPlayOn, true) end) end
+    end,
+})
+
+AITab:CreateSection({ name = "STATUS" })
+
+local aiStatus
+pcall(function()
+    aiStatus = AITab:CreateParagraph({
+        title = "AI Status", Title = "AI Status",
+        content = "Idle - turn on AI Play to start hunting.",
+        Content = "Idle - turn on AI Play to start hunting.",
+    })
+end)
+
 -- ================================================================ Settings tab ====
 local SettingsTab = Window:CreateTab({ name = "Settings" })
 
@@ -1323,6 +1512,8 @@ SettingsTab:CreateButton({
     callback = function()
         autoAttackOn = false
         autoDodgeOn = false
+        aiPlayOn = false
+        if aiCleanup then pcall(aiCleanup) end
         removeRing()
         clearHighlight()
         for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
@@ -1371,6 +1562,7 @@ end
 
 local function isValidTargetEntry(op)
     if op == player then return nil end
+    if blacklist[string.lower(op.Name)] then return nil end
     local char = op.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -1536,5 +1728,433 @@ track(RunService.Heartbeat:Connect(function(dt)
     lastAttack = tick()
     currentDelay = computeDelay()
 end))
+
+-- ================================================================ AI Play engine ====
+local aiVirtualUser = nil
+local aiControls = nil
+local aiWasActive = false
+local aiForceRepath = false
+local aiWps = nil
+local aiWpIndex = 0
+local aiPathTarget = nil
+local aiPathTime = 0
+local aiLastPos = nil
+local aiStuck = 0
+local aiLastJump = 0
+local aiPulseT = 0
+local aiStatusText = nil
+local aiStatusTime = 0
+local aiKeyFallbackDone = false
+local keyState = { w = false, a = false, s = false, d = false }
+
+local targetAtt0, targetAtt1, targetBeam
+local pathAtt0, pathAtt1, pathBeam
+local wpPart
+
+local pathAgent = PathfindingService:CreatePath({
+    AgentRadius = 2.5,
+    AgentHeight = 5,
+    AgentCanJump = true,
+    AgentCanClimb = false,
+    WaypointSpacing = 4,
+})
+
+local function ensureVirtualUser()
+    if aiVirtualUser then return true end
+    local ok, vu = pcall(function() return game:GetService("VirtualUser") end)
+    if ok and vu then
+        aiVirtualUser = vu
+        pcall(function() aiVirtualUser:CaptureController() end)
+        return true
+    end
+    return false
+end
+
+local function ensureControls()
+    if aiControls ~= nil then return aiControls end
+    local ok, ctl = pcall(function()
+        local ps = player:FindFirstChildOfClass("PlayerScripts")
+            or player:WaitForChild("PlayerScripts", 4)
+        if not ps then return false end
+        local pm = ps:FindFirstChild("PlayerModule") or ps:WaitForChild("PlayerModule", 4)
+        if not pm then return false end
+        return require(pm):GetControls()
+    end)
+    aiControls = (ok and ctl) or false
+    return aiControls
+end
+
+local function pressKey(key, down)
+    if keyState[key] == down then return end
+    keyState[key] = down
+    if not aiVirtualUser then return end
+    pcall(function()
+        if down then
+            aiVirtualUser:SetKeyDown(key)
+        else
+            aiVirtualUser:SetKeyUp(key)
+        end
+    end)
+end
+
+local function camBasis()
+    local cam = Workspace.CurrentCamera
+    local look = (cam and cam.CFrame.LookVector) or Vector3.new(0, 0, -1)
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    flatLook = (flatLook.Magnitude > 1e-3) and flatLook.Unit or Vector3.new(0, 0, -1)
+    return flatLook, Vector3.new(-flatLook.Z, 0, flatLook.X)
+end
+
+local function releaseAllKeys()
+    pressKey("w", false)
+    pressKey("a", false)
+    pressKey("s", false)
+    pressKey("d", false)
+end
+
+local function aiStop()
+    releaseAllKeys()
+    if aiMoveMode == "MoveVector" and aiControls then
+        pcall(function() aiControls:SetMoveVector(Vector3.zero) end)
+    end
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then pcall(function() hum:Move(Vector3.zero, false) end) end
+end
+
+local function aiMove(dir)
+    if aiMoveMode == "MoveVector" then
+        local ctl = ensureControls()
+        if ctl then
+            local flatLook, flatRight = camBasis()
+            local f = dir:Dot(flatLook)
+            local r = dir:Dot(flatRight)
+            pcall(function() ctl:SetMoveVector(Vector3.new(r, 0, -f)) end)
+            return
+        end
+        -- no ControlModule: fall through to key simulation
+    end
+    if aiMoveMode ~= "MoveTo" and ensureVirtualUser() then
+        local flatLook, flatRight = camBasis()
+        local f = dir:Dot(flatLook)
+        local r = dir:Dot(flatRight)
+        pressKey("w", f > 0.3)
+        pressKey("s", f < -0.3)
+        pressKey("d", r > 0.3)
+        pressKey("a", r < -0.3)
+        return
+    end
+    -- MoveTo mode / final fallback
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if root and hum then
+        pcall(function() hum:Move(Vector3.new(dir.X, 0, dir.Z), false) end)
+    end
+end
+
+local function destroyBeam(att0, att1, beam)
+    if beam then pcall(function() beam:Destroy() end) end
+    if att0 then pcall(function() att0:Destroy() end) end
+    if att1 then pcall(function() att1:Destroy() end) end
+    return nil, nil, nil
+end
+
+local function removeAIVisuals()
+    targetAtt0, targetAtt1, targetBeam = destroyBeam(targetAtt0, targetAtt1, targetBeam)
+    pathAtt0, pathAtt1, pathBeam = destroyBeam(pathAtt0, pathAtt1, pathBeam)
+    if wpPart then pcall(function() wpPart:Destroy() end); wpPart = nil end
+end
+
+local function makeBeam(att0, att1, parentTo, colA, colB, w0, w1, curve)
+    local b = Instance.new("Beam")
+    b.Attachment0 = att0
+    b.Attachment1 = att1
+    b.Color = ColorSequence.new(colA, colB)
+    b.Transparency = NumberSequence.new(0.1)
+    b.Width0 = w0
+    b.Width1 = w1
+    b.FaceCamera = true
+    b.LightEmission = 1
+    b.LightInfluence = 0
+    b.Segments = 20
+    b.CurveSize0 = curve
+    b.CurveSize1 = curve
+    b.Parent = parentTo
+    return b
+end
+
+local function ensureTargetLine(myRoot, tRoot)
+    if not aiDrawLine then return end
+    if targetBeam and targetAtt0 and targetAtt0.Parent == myRoot
+        and targetAtt1 and targetAtt1.Parent == tRoot then return end
+    targetAtt0, targetAtt1, targetBeam = destroyBeam(targetAtt0, targetAtt1, targetBeam)
+    local ok = pcall(function()
+        local a0 = Instance.new("Attachment")
+        a0.Position = Vector3.new(0, 1, 0)
+        a0.Parent = myRoot
+        local a1 = Instance.new("Attachment")
+        a1.Position = Vector3.new(0, 1, 0)
+        a1.Parent = tRoot
+        targetAtt0, targetAtt1 = a0, a1
+        targetBeam = makeBeam(a0, a1, myRoot, visualColor, Color3.fromRGB(255, 236, 244), 0.14, 0.1, 0)
+    end)
+    if not ok then targetAtt0, targetAtt1, targetBeam = destroyBeam(targetAtt0, targetAtt1, targetBeam) end
+end
+
+local function ensureWpPart()
+    if wpPart and wpPart.Parent then return wpPart end
+    wpPart = Instance.new("Part")
+    wpPart.Name = "LG_AAD3_WP"
+    wpPart.Size = Vector3.new(0.4, 0.4, 0.4)
+    wpPart.Transparency = 1
+    wpPart.Anchored = true
+    wpPart.CanCollide = false
+    wpPart.CanQuery = false
+    wpPart.CanTouch = false
+    wpPart.CastShadow = false
+    wpPart.Parent = Workspace
+    return wpPart
+end
+
+local function ensurePathLine(myRoot)
+    if not aiShowPath then return end
+    local ok, part = pcall(function()
+        local p = ensureWpPart()
+        if pathBeam and pathAtt0 and pathAtt0.Parent == myRoot
+            and pathAtt1 and pathAtt1.Parent == p then return p end
+        pathAtt0, pathAtt1, pathBeam = destroyBeam(pathAtt0, pathAtt1, pathBeam)
+        local a0 = Instance.new("Attachment")
+        a0.Position = Vector3.new(0, 1, 0)
+        a0.Parent = myRoot
+        local a1 = Instance.new("Attachment")
+        a1.Parent = p
+        pathAtt0, pathAtt1 = a0, a1
+        pathBeam = makeBeam(a0, a1, myRoot, Color3.fromRGB(255, 255, 255), visualColor, 0.07, 0.07, 2)
+        return p
+    end)
+    if not ok then
+        pathAtt0, pathAtt1, pathBeam = destroyBeam(pathAtt0, pathAtt1, pathBeam)
+    end
+end
+
+local function setAIStatus(text)
+    if text == aiStatusText and tick() - aiStatusTime < 1 then return end
+    aiStatusText = text
+    aiStatusTime = tick()
+    if not aiStatus then return end
+    local ok = pcall(function() aiStatus:Set({ title = "AI Status", content = text }) end)
+    if not ok then pcall(function() aiStatus:Set({ Title = "AI Status", Content = text }) end) end
+end
+
+local function aiSelectTarget(myRoot)
+    local best, bestDist = nil, aiSearchRange
+    for _, op in ipairs(Players:GetPlayers()) do
+        local entry = isValidTargetEntry(op)
+        if entry then
+            local d = (entry.root.Position - myRoot.Position).Magnitude
+            if d < bestDist then best, bestDist = entry, d end
+        end
+    end
+    return best, bestDist
+end
+
+local function aiEnsurePath(myPos, tPos)
+    local targetMoved = (not aiPathTarget) or ((tPos - aiPathTarget).Magnitude > 6)
+    local aged = (tick() - aiPathTime) > math.max(0.3, aiRepath)
+    local exhausted = (not aiWps) or (aiWpIndex >= #aiWps)
+    if not (targetMoved or aged or exhausted or aiForceRepath) then return true end
+    aiForceRepath = false
+    local ok = pcall(function() pathAgent:ComputeAsync(myPos, tPos) end)
+    aiPathTime = tick()
+    aiPathTarget = tPos
+    aiWps = nil
+    aiWpIndex = 1
+    if ok and pathAgent.Status == Enum.PathStatus.Success then
+        aiWps = pathAgent:GetWaypoints()
+        return true
+    end
+    return false
+end
+
+local function aiFollowPath(myRoot, myHum)
+    local wp = aiWps and aiWps[aiWpIndex]
+    if not wp then return nil end
+    local wpPos = wp.Position
+    local flatDelta = Vector3.new(wpPos.X - myRoot.Position.X, 0, wpPos.Z - myRoot.Position.Z)
+    if flatDelta.Magnitude < 3 then
+        aiWpIndex = aiWpIndex + 1
+        wp = aiWps[aiWpIndex]
+        if not wp then return nil end
+        wpPos = wp.Position
+    end
+    if wp.Action == Enum.PathWaypointAction.Jump and aiAutoJump and myHum
+        and tick() - aiLastJump > 0.4 then
+        aiLastJump = tick()
+        pcall(function() myHum.Jump = true end)
+    end
+    local dir = wpPos - myRoot.Position
+    dir = Vector3.new(dir.X, 0, dir.Z)
+    if dir.Magnitude < 1e-3 then return nil end
+    return dir.Unit
+end
+
+local function aiStep()
+    local char = player.Character
+    local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+    local myHum = char and char:FindFirstChildOfClass("Humanoid")
+
+    if not aiPlayOn then
+        if aiWasActive then
+            aiWasActive = false
+            pcall(aiStop)
+            removeAIVisuals()
+            aiTarget = nil
+            aiWps = nil
+            setAIStatus("Idle")
+        end
+        return
+    end
+    aiWasActive = true
+
+    if not myRoot or not myHum or myHum.Health <= 0 then
+        pcall(aiStop)
+        removeAIVisuals()
+        aiTarget = nil
+        setAIStatus("Waiting for character...")
+        return
+    end
+
+    local entry = aiSelectTarget(myRoot)
+    if not entry then
+        aiTarget = nil
+        pcall(aiStop)
+        removeAIVisuals()
+        setAIStatus("No player within " .. tostring(math.floor(aiSearchRange)) .. " studs")
+        return
+    end
+
+    aiTarget = entry.char
+    local tRoot = entry.root
+    local tPos = tRoot.Position
+    local myPos = myRoot.Position
+    local dist = (tPos - myPos).Magnitude
+
+    ensureTargetLine(myRoot, tRoot)
+
+    if dist <= aiStopRange then
+        pcall(aiStop)
+        aiWps = nil
+        aiWpIndex = 0
+        if wpPart and wpPart.Parent then
+            pcall(function() wpPart.CFrame = CFrame.new(tPos) end)
+        end
+        setAIStatus("In range: " .. entry.char.Name .. " | " .. string.format("%.0f", dist) .. " studs | attacking")
+        aiStuck = 0
+        aiLastPos = myPos
+        return
+    end
+
+    local dir = nil
+    if aiPathfind then
+        local okPath = aiEnsurePath(myPos, tPos)
+        if okPath and aiWps then
+            ensurePathLine(myRoot)
+            dir = aiFollowPath(myRoot, myHum)
+        end
+        if not dir then
+            -- path unavailable this frame: beeline so we never freeze
+            local d = tPos - myPos
+            local flat = Vector3.new(d.X, 0, d.Z)
+            if flat.Magnitude > 1e-3 then dir = flat.Unit end
+        end
+    else
+        local d = tPos - myPos
+        local flat = Vector3.new(d.X, 0, d.Z)
+        if flat.Magnitude > 1e-3 then dir = flat.Unit end
+    end
+
+    if aiPathfind and wpPart and wpPart.Parent then
+        local cur = aiWps and aiWps[aiWpIndex]
+        pcall(function() wpPart.CFrame = CFrame.new((cur and cur.Position) or tPos) end)
+    end
+
+    if dir then
+        aiMove(dir)
+        if aiLastPos and (myPos - aiLastPos).Magnitude < 0.4 then
+            aiStuck = aiStuck + 0.05
+            if aiStuck > 1.2 then
+                aiStuck = 0
+                if aiAutoJump and myHum then pcall(function() myHum.Jump = true end) end
+                aiForceRepath = true
+                if aiMoveMode == "WASD Keys" and not aiKeyFallbackDone
+                    and (keyState.w or keyState.a or keyState.s or keyState.d) then
+                    -- keys pressed but nothing moved: switch strategy once
+                    aiKeyFallbackDone = true
+                    aiMoveMode = "MoveVector"
+                    if aiMoveModeCtl then pcall(function() aiMoveModeCtl:Set("MoveVector", true) end) end
+                    notify("AI Play", "WASD keys didn't move you - switched to MoveVector", "alert-triangle")
+                end
+            end
+        else
+            aiStuck = 0
+        end
+        setAIStatus("Chasing " .. entry.char.Name .. " | " .. string.format("%.0f", dist)
+            .. " studs | " .. (aiPathfind and "routing around obstacles" or "beelining"))
+    else
+        pcall(aiStop)
+    end
+    aiLastPos = myPos
+end
+
+aiCleanup = function()
+    aiPlayOn = false
+    pcall(aiStop)
+    removeAIVisuals()
+    aiTarget = nil
+    aiWps = nil
+    aiWpIndex = 0
+    aiStuck = 0
+    setAIStatus("Idle")
+end
+
+-- beam pulse + aimbot (RenderStepped)
+track(RunService.RenderStepped:Connect(function()
+    local ok, err = pcall(function()
+        aiPulseT = aiPulseT + 0.016
+        local w = 0.12 + math.sin(aiPulseT * 5) * 0.04
+        if targetBeam then
+            targetBeam.Width0 = w
+            targetBeam.Width1 = w * 0.8
+        end
+        if pathBeam then
+            pathBeam.CurveSize0 = 1.5 + math.sin(aiPulseT * 2.2) * 1.2
+            pathBeam.CurveSize1 = pathBeam.CurveSize0
+        end
+        if aiPlayOn and aiAimbot and aiTarget then
+            local myChar = player.Character
+            local cam = Workspace.CurrentCamera
+            local part = aiTarget:FindFirstChild(aiAimPart)
+                or aiTarget:FindFirstChild("HumanoidRootPart")
+            if myChar and myChar:FindFirstChild("HumanoidRootPart") and cam and part then
+                local myPos = cam.CFrame.Position
+                local aimPos = part.Position
+                if (aimPos - myPos).Magnitude > 1 then
+                    cam.CFrame = cam.CFrame:Lerp(CFrame.lookAt(myPos, aimPos), aiAimSmooth)
+                end
+            end
+        end
+    end)
+    if not ok then warn("[AAD3 AI] render: " .. tostring(err)) end
+end))
+
+-- main AI loop
+task.spawn(function()
+    while true do
+        local ok, err = pcall(aiStep)
+        if not ok then warn("[AAD3 AI] " .. tostring(err)) end
+        task.wait(aiPlayOn and 0.05 or 0.25)
+    end
+end)
 
 print("[AAD3] Loaded via Rayfield Gen2 (Sakura Mayhem). Combat ready: " .. tostring(combatReady))
