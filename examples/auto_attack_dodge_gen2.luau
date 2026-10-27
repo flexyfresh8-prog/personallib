@@ -1,17 +1,19 @@
 --[[
-    Auto Attack + Auto Dodge — Rayfield Gen 2 Edition (Sakura Theme + Mayhem)
-    Uses Rayfield Gen2 (https://sirius.menu/gen2) — full rebuild, faster and
-    more stable than the original. Custom Sakura theme with cherry-blossom
-    pinks on a warm dark plum base.
+    Auto Attack + Auto Dodge — Rayfield Gen 2 (Sakura Mayhem Edition)
+    Uses Rayfield Gen2 (https://sirius.menu/gen2) — open source, animations go wild.
 
-    Sakura environment (since Rayfield is open source, animations go mayhem):
-      - 36 procedurally-generated cherry blossom petals falling, swaying, and
-        rotating across the whole screen, forever.
-      - A procedural sakura tree in the lower-left: brown gradient trunk +
-        8 overlapping pink canopy circles, gently swaying.
-      - Window entrance: scale 0.85 -> 1 with Back easing + slight rotation.
-      - Window idle drift: subtle figure-8 via RunService (sin/cos).
-      - Petal burst at the window center on every toggle change and hotkey.
+    Sakura environment:
+      - Proper branching sakura tree (trunk → 2-3 main branches → sub-branches
+        → blossom clusters at tips) with per-branch sway.
+      - 50 falling petals with sway + rotation + transparency variance.
+      - Periodic wind-gust bursts.
+      - Cursor trail of mini petals following your finger/mouse.
+      - Random sparkle bursts at random positions.
+      - Background gradient slowly shifting through pink hues.
+      - Tree occasionally drops a blossom that floats down.
+      - Window: smaller size, entrance with back easing, figure-8 idle drift,
+        subtle rotation wobble, edge glow pulse.
+      - Petal burst at window center on every toggle/hotkey.
 
     Tabs:
       Combat:  Auto Attack (toggle + F hotkey), Range, Cooldown, Always Crit
@@ -24,29 +26,24 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
 
 -- ================================================================ cleanup ====
 local store = (type(getgenv) == "function" and getgenv()) or _G
-if store.LG_AAD2_Conns then
-    for _, c in ipairs(store.LG_AAD2_Conns) do
-        pcall(function() c:Disconnect() end)
-    end
-    store.LG_AAD2_Conns = nil
+if store.LG_AAD3_Conns then
+    for _, c in ipairs(store.LG_AAD3_Conns) do pcall(function() c:Disconnect() end) end
+    store.LG_AAD3_Conns = nil
 end
 local conns = {}
-store.LG_AAD2_Conns = conns
-local function track(c)
-    if c then table.insert(conns, c) end
-    return c
-end
+store.LG_AAD3_Conns = conns
+local function track(c) if c then table.insert(conns, c) end; return c end
 
 local function killOld(name)
     local holders = {}
-    if type(gethui) == "function" then
-        pcall(function() holders[#holders + 1] = gethui() end)
-    end
+    if type(gethui) == "function" then pcall(function() holders[#holders + 1] = gethui() end) end
     pcall(function() holders[#holders + 1] = game:GetService("CoreGui") end)
     pcall(function() holders[#holders + 1] = player:FindFirstChildOfClass("PlayerGui") end)
     for _, holder in ipairs(holders) do
@@ -55,8 +52,8 @@ local function killOld(name)
     end
 end
 killOld("Rayfield")
-killOld("LG_AAD2_Ring")
-killOld("LG_AAD2_Highlight")
+killOld("LG_AAD3_Ring")
+killOld("LG_AAD3_Highlight")
 killOld("LG_SakuraEnv")
 
 -- ================================================================ library ====
@@ -64,7 +61,7 @@ local okFetch, Rayfield = pcall(function()
     return loadstring(game:HttpGet("https://sirius.menu/gen2"))()
 end)
 if not okFetch or type(Rayfield) ~= "table" then
-    warn("[AAD2] Failed to load Rayfield Gen2: " .. tostring(Rayfield))
+    warn("[AAD3] Failed to load Rayfield Gen2: " .. tostring(Rayfield))
     return
 end
 
@@ -100,7 +97,7 @@ local lastDodge = 0
 local highlightOn = true
 local highlightMode = "Filled"
 local ringOn = false
-local visualColor = Color3.fromRGB(255, 122, 171) -- cherry pink
+local visualColor = Color3.fromRGB(255, 122, 171)
 
 -- ================================================================ visuals ====
 local ring = nil
@@ -113,7 +110,7 @@ end
 local function createRing()
     removeRing()
     ring = Instance.new("Part")
-    ring.Name = "LG_AAD2_Ring"
+    ring.Name = "LG_AAD3_Ring"
     ring.Shape = Enum.PartType.Cylinder
     ring.Size = Vector3.new(0.06, range * 2, range * 2)
     ring.Color = visualColor
@@ -158,7 +155,7 @@ local function setTargetHighlight(targetChar)
     clearHighlight()
     local ok = pcall(function()
         currentHighlight = Instance.new("Highlight")
-        currentHighlight.Name = "LG_AAD2_Highlight"
+        currentHighlight.Name = "LG_AAD3_Highlight"
         currentHighlight.FillColor = visualColor
         currentHighlight.OutlineColor = visualColor
         currentHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -209,22 +206,19 @@ local function getClosestTarget(maxDist)
 end
 
 -- ================================================================ dodge ====
--- Heuristic: when an enemy within dodgeRange is moving toward us at speed
--- AND roughly facing us, trigger evasive movement. Cooldown prevents spam.
 local function performDodge(enemyRoot, myRoot, myHum)
     if not myHum or myHum.Health <= 0 then return end
     local toMe = (myRoot.Position - enemyRoot.Position)
     if toMe.Magnitude < 1e-3 then return end
     toMe = toMe.Unit
-    -- perpendicular axis (horizontal only)
     local perp = Vector3.new(-toMe.Z, 0, toMe.X)
     if math.random() < 0.5 then perp = -perp end
 
     local function makeBV(vel)
-        local bv = myRoot:FindFirstChild("LG_AAD2_DodgeBV")
+        local bv = myRoot:FindFirstChild("LG_AAD3_DodgeBV")
         if not bv then
             bv = Instance.new("BodyVelocity")
-            bv.Name = "LG_AAD2_DodgeBV"
+            bv.Name = "LG_AAD3_DodgeBV"
             bv.MaxForce = Vector3.new(1e5, 0, 1e5)
             bv.P = 1e4
             bv.Parent = myRoot
@@ -283,16 +277,11 @@ local function checkDodge()
 end
 
 -- ================================================================ sakura env ====
--- Actual visible cherry blossom petals falling across the screen + a
--- procedural sakura tree decoration. Animation mayhem: entrance, idle drift,
--- glow pulse, and petal bursts on every toggle change.
+-- Full sakura environment with branching tree, falling petals, cursor trail,
+-- sparkles, wind gusts, and background color shift.
 
-local TweenService = game:GetService("TweenService")
 local sakuraGui = nil
-local petalFolder = nil
-local treeFolder = nil
 local envConns = {}
-
 local function trackEnv(c) if c then table.insert(envConns, c) end; return c end
 
 local PETAL_COLORS = {
@@ -301,78 +290,77 @@ local PETAL_COLORS = {
     Color3.fromRGB(255, 122, 171),
     Color3.fromRGB(255, 143, 171),
     Color3.fromRGB(255, 235, 238),
+    Color3.fromRGB(255, 156, 187),
 }
 
--- One petal: a Frame with UICorner shaped like a rounded petal, gradient fill,
--- falling+swaying+rotating forever.
-local function makePetal(parent, vpW, vpH)
-    local size = math.random(8, 22)
+local function seq(a, b) return ColorSequence.new(a, b) end
+
+-- single petal frame (rounded shape via UICorner with high radius + aspect)
+local function makePetalFrame(parent, size, color, transparency)
     local p = Instance.new("Frame")
     p.Name = "Petal"
     p.Size = UDim2.fromOffset(size, math.floor(size * 0.78))
-    p.BackgroundColor3 = PETAL_COLORS[math.random(1, #PETAL_COLORS)]
-    p.BackgroundTransparency = math.random(20, 80) / 100
+    p.BackgroundColor3 = color
+    p.BackgroundTransparency = transparency or 0.1
     p.BorderSizePixel = 0
-    p.Rotation = math.random(0, 359)
     p.ZIndex = 9998
 
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0.55, 0)
-    corner.Parent = p
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0.5, 0)
+    c.Parent = p
 
-    local grad = Instance.new("UIGradient")
-    grad.Color = ColorSequence.new(p.BackgroundColor3, Color3.fromRGB(255, 245, 248))
-    grad.Rotation = math.random(0, 360)
-    grad.Parent = p
+    local g = Instance.new("UIGradient")
+    g.Color = ColorSequence.new(color, Color3.fromRGB(255, 245, 248))
+    g.Rotation = math.random(0, 360)
+    g.Parent = p
 
     p.Parent = parent
-    p.Position = UDim2.fromOffset(math.random(-20, vpW + 20), -size)
+    return p
+end
+
+-- A petal that falls forever with sway + rotation, then respawns at top.
+local function spawnFallingPetal(parent, vpW, vpH, startY)
+    local size = math.random(8, 22)
+    local color = PETAL_COLORS[math.random(1, #PETAL_COLORS)]
+    local p = makePetalFrame(parent, size, color, math.random(15, 70) / 100)
+    p.Position = UDim2.fromOffset(math.random(-20, vpW + 20), startY or -size)
 
     local function drop()
         local startX = p.Position.X.Offset
-        local targetX = startX + math.random(-120, 120)
+        local targetX = startX + math.random(-160, 160)
         local targetY = vpH + size + 20
         local dur = math.random(7, 16)
-        local sway = math.random(40, 120)
+        local rotEnd = p.Rotation + math.random(-720, 720)
 
-        -- position fall
         local posInfo = TweenInfo.new(dur, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-        local posTween = TweenService:Create(p, posInfo, {
-            Position = UDim2.fromOffset(targetX, targetY),
-        })
+        local posT = TweenService:Create(p, posInfo, { Position = UDim2.fromOffset(targetX, targetY) })
         local rotInfo = TweenInfo.new(dur, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
-        local rotTween = TweenService:Create(p, rotInfo, {
-            Rotation = p.Rotation + math.random(-720, 720),
-        })
-        -- sway: nested sine oscillation via two opposing tweens
-        local swayInfo = TweenInfo.new(sway / 60, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-        local swayA = TweenService:Create(p, swayInfo, { Position = UDim2.fromOffset(targetX - sway, p.Position.Y.Offset) })
-        local swayB = TweenService:Create(p, swayInfo, { Position = UDim2.fromOffset(targetX + sway, p.Position.Y.Offset) })
+        local rotT = TweenService:Create(p, rotInfo, { Rotation = rotEnd })
 
-        posTween:Play()
-        rotTween:Play()
-        swayA:Play()
-        task.delay(sway / 60, function() pcall(function() swayB:Play() end) end)
+        posT:Play()
+        rotT:Play()
 
-        posTween.Completed:Connect(function()
+        posT.Completed:Connect(function()
+            if not p.Parent then return end
             p.Position = UDim2.fromOffset(math.random(-20, vpW + 20), -size)
             p.Rotation = math.random(0, 359)
-            p.BackgroundTransparency = math.random(20, 80) / 100
+            p.BackgroundTransparency = math.random(15, 70) / 100
             drop()
         end)
     end
-
     drop()
     return p
 end
 
--- Build the sakura tree procedurally (trunk + layered canopy circles).
-local function buildTree(parent, x, y)
+-- Build a real branching sakura tree.
+-- Trunk splits into 2-3 main branches, each splits again, blossoms cluster at tips.
+local function buildBranchingTree(parent, baseX, baseY, scale)
+    scale = scale or 1
     local tree = Instance.new("Frame")
     tree.Name = "SakuraTree"
     tree.BackgroundTransparency = 1
-    tree.Size = UDim2.fromOffset(180, 220)
-    tree.Position = UDim2.fromOffset(x, y)
+    tree.Size = UDim2.fromOffset(math.floor(180 * scale), math.floor(220 * scale))
+    tree.Position = UDim2.fromOffset(baseX, baseY)
     tree.ZIndex = 9990
     tree.Parent = parent
 
@@ -381,107 +369,215 @@ local function buildTree(parent, x, y)
     trunk.Name = "Trunk"
     trunk.AnchorPoint = Vector2.new(0.5, 1)
     trunk.Position = UDim2.new(0.5, 0, 1, 0)
-    trunk.Size = UDim2.fromOffset(20, 110)
+    trunk.Size = UDim2.fromOffset(math.floor(18 * scale), math.floor(95 * scale))
     trunk.BackgroundColor3 = Color3.fromRGB(82, 53, 42)
     trunk.BorderSizePixel = 0
     trunk.ZIndex = 9991
     trunk.Parent = tree
     local tgrad = Instance.new("UIGradient")
-    tgrad.Color = ColorSequence.new(Color3.fromRGB(105, 70, 55), Color3.fromRGB(60, 38, 30))
+    tgrad.Color = ColorSequence.new(Color3.fromRGB(112, 75, 58), Color3.fromRGB(58, 36, 28))
     tgrad.Rotation = 90
     tgrad.Parent = trunk
     local tcorner = Instance.new("UICorner")
-    tcorner.CornerRadius = UDim.new(0, 8)
+    tcorner.CornerRadius = UDim.new(0, math.floor(6 * scale))
     tcorner.Parent = trunk
 
-    -- canopy: 8 overlapping pink circles
-    local canopy = Instance.new("Frame")
-    canopy.Name = "Canopy"
-    canopy.BackgroundTransparency = 1
-    canopy.AnchorPoint = Vector2.new(0.5, 1)
-    canopy.Position = UDim2.new(0.5, 0, 0.5, -10)
-    canopy.Size = UDim2.fromOffset(180, 130)
-    canopy.ZIndex = 9992
-    canopy.Parent = tree
-
-    local circles = {
-        { x = 0, y = 0, s = 92, c = 1 },
-        { x = -42, y = 8, s = 78, c = 2 },
-        { x = 42, y = 8, s = 78, c = 2 },
-        { x = -28, y = -32, s = 70, c = 3 },
-        { x = 28, y = -32, s = 70, c = 3 },
-        { x = 0, y = -42, s = 64, c = 4 },
-        { x = -58, y = -8, s = 56, c = 1 },
-        { x = 58, y = -8, s = 56, c = 1 },
-    }
-    local canopyShapes = {}
-    for i, c in ipairs(circles) do
-        local circ = Instance.new("Frame")
-        circ.Name = "Bloom" .. i
-        circ.AnchorPoint = Vector2.new(0.5, 0.5)
-        circ.Position = UDim2.fromOffset(90 + c.x, 65 + c.y)
-        circ.Size = UDim2.fromOffset(c.s, c.s)
-        circ.BackgroundColor3 = PETAL_COLORS[c.c]
-        circ.BackgroundTransparency = 0.04
-        circ.BorderSizePixel = 0
-        circ.ZIndex = 9992 + (10 - i)
-        circ.Parent = canopy
-        local cc = Instance.new("UICorner")
-        cc.CornerRadius = UDim.new(1, 0)
-        cc.Parent = circ
+    -- helper: create a branch as a rotated tapered frame
+    local branches = {}
+    local function makeBranch(x, y, length, angle, thickness, depth)
+        local b = Instance.new("Frame")
+        b.Name = "Branch" .. depth
+        b.AnchorPoint = Vector2.new(0.5, 1)
+        b.Size = UDim2.fromOffset(math.max(2, thickness), length)
+        b.Position = UDim2.fromOffset(x, y)
+        b.BackgroundColor3 = Color3.fromRGB(95, 62, 48)
+        b.BorderSizePixel = 0
+        b.Rotation = angle
+        b.ZIndex = 9992 - depth
+        b.Parent = tree
         local g = Instance.new("UIGradient")
-        g.Color = ColorSequence.new(PETAL_COLORS[c.c], Color3.fromRGB(255, 235, 240))
-        g.Rotation = math.random(0, 360)
-        g.Parent = circ
-        table.insert(canopyShapes, circ)
+        g.Color = ColorSequence.new(Color3.fromRGB(115, 78, 62), Color3.fromRGB(70, 44, 34))
+        g.Rotation = 90
+        g.Parent = b
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, math.max(1, thickness / 2))
+        c.Parent = b
+        table.insert(branches, b)
+        return b
     end
 
-    -- subtle ambient sway for the canopy
+    -- blossom cluster: small circles bunched at branch tips
+    local blossoms = {}
+    local function makeBlossomCluster(x, y, radius)
+        local cluster = Instance.new("Frame")
+        cluster.Name = "BlossomCluster"
+        cluster.BackgroundTransparency = 1
+        cluster.AnchorPoint = Vector2.new(0.5, 0.5)
+        cluster.Position = UDim2.fromOffset(x, y)
+        cluster.Size = UDim2.fromOffset(radius * 2, radius * 2)
+        cluster.ZIndex = 9995
+        cluster.Parent = tree
+
+        -- 5-7 small circles overlapping
+        local count = math.random(5, 8)
+        for i = 1, count do
+            local ang = (i / count) * math.pi * 2
+            local r = radius * 0.55
+            local cx = radius + math.cos(ang) * r
+            local cy = radius + math.sin(ang) * r
+            local sz = math.random(math.floor(radius * 0.7), math.floor(radius * 1.1))
+
+            local circ = Instance.new("Frame")
+            circ.Name = "Blossom" .. i
+            circ.AnchorPoint = Vector2.new(0.5, 0.5)
+            circ.Position = UDim2.fromOffset(cx, cy)
+            circ.Size = UDim2.fromOffset(sz, sz)
+            circ.BackgroundColor3 = PETAL_COLORS[math.random(1, #PETAL_COLORS)]
+            circ.BackgroundTransparency = math.random(5, 25) / 100
+            circ.BorderSizePixel = 0
+            circ.ZIndex = 9995 + i
+            circ.Parent = cluster
+            local cc = Instance.new("UICorner")
+            cc.CornerRadius = UDim.new(1, 0)
+            cc.Parent = circ
+            local g = Instance.new("UIGradient")
+            g.Color = ColorSequence.new(circ.BackgroundColor3, Color3.fromRGB(255, 235, 240))
+            g.Rotation = math.random(0, 360)
+            g.Parent = circ
+            table.insert(blossoms, circ)
+        end
+        -- center blossom
+        local center = Instance.new("Frame")
+        center.Name = "BlossomCenter"
+        center.AnchorPoint = Vector2.new(0.5, 0.5)
+        center.Position = UDim2.fromOffset(radius, radius)
+        center.Size = UDim2.fromOffset(math.floor(radius * 0.9), math.floor(radius * 0.9))
+        center.BackgroundColor3 = PETAL_COLORS[1]
+        center.BackgroundTransparency = 0.05
+        center.BorderSizePixel = 0
+        center.ZIndex = 9995
+        center.Parent = cluster
+        local cc = Instance.new("UICorner")
+        cc.CornerRadius = UDim.new(1, 0)
+        cc.Parent = center
+        local g = Instance.new("UIGradient")
+        g.Color = ColorSequence.new(PETAL_COLORS[1], Color3.fromRGB(255, 220, 230))
+        g.Parent = center
+        table.insert(blossoms, center)
+        return cluster, blossoms
+    end
+
+    -- recursive branch structure
+    local function growBranch(x, y, length, angle, thickness, depth, parentBranch)
+        if depth <= 0 or length < 6 then
+            -- tip: blossom cluster
+            local tipX = x + math.sin(math.rad(angle)) * length * 0.5
+            local tipY = y - length * 0.5
+            makeBlossomCluster(tipX, tipY, math.random(12, 18))
+            return
+        end
+
+        local b = makeBranch(x, y, length, angle, thickness, depth)
+
+        -- tip position (top of branch, accounting for rotation)
+        -- anchor point is (0.5, 1), so top is at (x, y - length) rotated around (x, y)
+        local rad = math.rad(angle)
+        local tipX = x + math.sin(rad) * length
+        local tipY = y - math.cos(rad) * length
+
+        -- split into 2-3 children
+        local numChildren = math.random(2, 3)
+        for i = 1, numChildren do
+            local spread = 35 + math.random(-15, 15)
+            local childAngle = angle + (i - (numChildren + 1) / 2) * spread
+            local childLength = length * (0.55 + math.random() * 0.2)
+            local childThickness = math.max(2, thickness * 0.65)
+            growBranch(tipX, tipY, childLength, childAngle, childThickness, depth - 1, b)
+        end
+    end
+
+    -- start: trunk top is at (centerX, treeBottom - trunkHeight)
+    local centerX = math.floor(90 * scale)
+    local trunkTopY = math.floor(220 * scale) - math.floor(95 * scale)
+
+    -- 3 main branches emerging from trunk top
+    local mainAngles = { -32, 0, 32 }
+    for _, ang in ipairs(mainAngles) do
+        growBranch(centerX, trunkTopY, math.floor(48 * scale), ang, math.floor(11 * scale), 3, nil)
+    end
+
+    -- per-branch sway: each branch rotates a tiny amount on a different phase
     task.spawn(function()
-        while canopy.Parent do
-            local swayInfo = TweenInfo.new(2.4 + math.random() * 0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-            local sway = TweenService:Create(canopy, swayInfo, {
-                Rotation = 2 + math.random(-10, 10) / 10,
-            })
-            sway:Play()
-            task.wait(2.4)
+        local phases = {}
+        for i, b in ipairs(branches) do
+            phases[b] = math.random() * math.pi * 2
+            b:SetAttribute("BaseAngle", b.Rotation)
+        end
+        while tree.Parent do
+            local t = tick()
+            for _, b in ipairs(branches) do
+                if b and b.Parent then
+                    local base = b:GetAttribute("BaseAngle") or b.Rotation
+                    local phase = phases[b] or 0
+                    local sway = math.sin(t * 0.7 + phase) * 2.5
+                    b.Rotation = base + sway
+                end
+            end
+            task.wait(0.05)
         end
     end)
 
-    return tree, canopyShapes
+    -- blossoms occasionally detach and float down
+    task.spawn(function()
+        while tree.Parent do
+            task.wait(math.random(4, 9))
+            if #blossoms > 0 then
+                local idx = math.random(1, #blossoms)
+                local src = blossoms[idx]
+                if src and src.Parent then
+                    local clone = src:Clone()
+                    clone.Name = "DetachedBlossom"
+                    clone.Parent = sakuraGui
+                    -- get absolute position
+                    local absX = src.AbsolutePosition.X
+                    local absY = src.AbsolutePosition.Y
+                    clone.AnchorPoint = Vector2.new(0.5, 0.5)
+                    clone.Position = UDim2.fromOffset(absX, absY)
+                    clone.ZIndex = 9997
+                    local info = TweenInfo.new(math.random(6, 10), Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+                    local t = TweenService:Create(clone, info, {
+                        Position = UDim2.fromOffset(absX + math.random(-80, 80), absY + 600),
+                        Rotation = math.random(-540, 540),
+                        BackgroundTransparency = 1,
+                    })
+                    t:Play()
+                    t.Completed:Connect(function() pcall(function() clone:Destroy() end) end)
+                end
+            end
+        end
+    end)
+
+    return tree, branches
 end
 
--- Spawn a petal burst at a screen position (e.g. window center) on toggle changes.
-local function petalBurst(x, y)
+-- petal burst at (x, y)
+local function petalBurst(x, y, count)
+    count = count or 14
     if not sakuraGui or not sakuraGui.Parent then return end
-    local burstFolder = Instance.new("Folder")
-    burstFolder.Name = "Burst"
-    burstFolder.Parent = sakuraGui
+    local burst = Instance.new("Folder")
+    burst.Name = "Burst"
+    burst.Parent = sakuraGui
 
-    local count = 14
     for i = 1, count do
         local angle = (i / count) * math.pi * 2 + math.random() * 0.4
-        local dist = math.random(60, 140)
+        local dist = math.random(60, 150)
         local tx = x + math.cos(angle) * dist
         local ty = y + math.sin(angle) * dist
-        local size = math.random(10, 20)
-
-        local p = Instance.new("Frame")
-        p.Name = "BurstPetal"
-        p.Size = UDim2.fromOffset(size, math.floor(size * 0.78))
+        local size = math.random(10, 22)
+        local color = PETAL_COLORS[math.random(1, #PETAL_COLORS)]
+        local p = makePetalFrame(burst, size, color, 0.05)
         p.Position = UDim2.fromOffset(x, y)
-        p.BackgroundColor3 = PETAL_COLORS[math.random(1, #PETAL_COLORS)]
-        p.BackgroundTransparency = 0.05
-        p.BorderSizePixel = 0
         p.ZIndex = 9999
-        local c = Instance.new("UICorner")
-        c.CornerRadius = UDim.new(0.55, 0)
-        c.Parent = p
-        local g = Instance.new("UIGradient")
-        g.Color = ColorSequence.new(p.BackgroundColor3, Color3.fromRGB(255, 245, 248))
-        g.Rotation = math.random(0, 360)
-        g.Parent = p
-        p.Parent = burstFolder
 
         local info = TweenInfo.new(0.8 + math.random() * 0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
         local t = TweenService:Create(p, info, {
@@ -491,13 +587,10 @@ local function petalBurst(x, y)
         })
         t:Play()
     end
-
-    task.delay(1.6, function()
-        pcall(function() burstFolder:Destroy() end)
-    end)
+    task.delay(1.6, function() pcall(function() burst:Destroy() end) end)
 end
 
--- Find the Rayfield window's main frame so we can animate it.
+-- find the Rayfield window frame (search for the named window frame inside Rayfield holder)
 local function findRayfieldWindow()
     local holders = {}
     if type(gethui) == "function" then pcall(function() holders[#holders + 1] = gethui() end) end
@@ -507,13 +600,16 @@ local function findRayfieldWindow()
         if h then
             local rf = h:FindFirstChild("Rayfield", true)
             if rf then
-                -- the visible window frame is usually the first large Frame inside
+                -- look for the largest Frame inside Rayfield
+                local best
                 for _, d in ipairs(rf:GetDescendants()) do
-                    if d:IsA("Frame") and d.Name:lower():match("window") and d.Size.X.Scale > 0 then
-                        return rf, d
+                    if d:IsA("Frame") and d.Size.X.Scale > 0 and d.Size.Y.Scale > 0 then
+                        if not best or (d.AbsoluteSize.X * d.AbsoluteSize.Y) > (best.AbsoluteSize.X * best.AbsoluteSize.Y) then
+                            best = d
+                        end
                     end
                 end
-                return rf, rf:FindFirstChildWhichIsA("Frame")
+                return rf, best or rf:FindFirstChildWhichIsA("Frame")
             end
         end
     end
@@ -530,7 +626,7 @@ local function buildSakuraEnv()
     sakuraGui.Name = "LG_SakuraEnv"
     sakuraGui.ResetOnSpawn = false
     sakuraGui.IgnoreGuiInset = true
-    sakuraGui.DisplayOrder = 2147483646 -- just below Rayfield (which is max)
+    sakuraGui.DisplayOrder = 2147483646
     sakuraGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
     local okParent = pcall(function()
@@ -543,82 +639,186 @@ local function buildSakuraEnv()
         end)
     end
 
-    -- tree in the lower-left
-    treeFolder = Instance.new("Folder")
-    treeFolder.Name = "Trees"
-    treeFolder.Parent = sakuraGui
-    local _, canopyShapes = buildTree(treeFolder, 20, vh - 240)
+    -- background gradient frame: slowly shifts through pink hues
+    local bg = Instance.new("Frame")
+    bg.Name = "SakuraBg"
+    bg.Size = UDim2.fromScale(1, 1)
+    bg.BackgroundColor3 = Color3.fromRGB(255, 122, 171)
+    bg.BackgroundTransparency = 0.96
+    bg.BorderSizePixel = 0
+    bg.ZIndex = 9985
+    bg.Parent = sakuraGui
+    local bgGrad = Instance.new("UIGradient")
+    bgGrad.Color = seq(Color3.fromRGB(255, 122, 171), Color3.fromRGB(255, 183, 197))
+    bgGrad.Rotation = 45
+    bgGrad.Parent = bg
 
-    -- petals
-    petalFolder = Instance.new("Folder")
-    petalFolder.Name = "Petals"
-    petalFolder.Parent = sakuraGui
-    for _ = 1, 36 do
-        makePetal(petalFolder, vw, vh)
-    end
-
-    -- ambient canopy breathing
+    -- animate the background gradient rotation + color shift
     task.spawn(function()
-        while treeFolder.Parent do
-            for _, shape in ipairs(canopyShapes) do
-                local info = TweenInfo.new(1.6 + math.random() * 0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-                TweenService:Create(shape, info, {
-                    BackgroundTransparency = 0.02 + math.random() * 0.08,
-                }):Play()
-            end
-            task.wait(1.6)
+        local t0 = tick()
+        while bg.Parent do
+            local t = tick() - t0
+            bgGrad.Rotation = (t * 8) % 360
+            -- subtle transparency pulse
+            bg.BackgroundTransparency = 0.94 + math.sin(t * 0.5) * 0.04
+            task.wait(0.1)
         end
     end)
 
-    -- animate the Rayfield window itself
+    -- tree in the lower-left
+    local tree, branches = buildBranchingTree(sakuraGui, 20, vh - 240, 1)
+
+    -- 50 falling petals
+    local petalFolder = Instance.new("Folder")
+    petalFolder.Name = "Petals"
+    petalFolder.Parent = sakuraGui
+    for _ = 1, 50 do
+        spawnFallingPetal(petalFolder, vw, vh, math.random(-50, vh))
+    end
+
+    -- periodic wind gust: sudden burst of petals across screen
+    task.spawn(function()
+        while sakuraGui.Parent do
+            task.wait(math.random(8, 18))
+            for _ = 1, 20 do
+                spawnFallingPetal(petalFolder, vw, vh, -20)
+            end
+        end
+    end)
+
+    -- cursor trail: mini petals follow mouse/touch
+    local trailFolder = Instance.new("Folder")
+    trailFolder.Name = "CursorTrail"
+    trailFolder.Parent = sakuraGui
+
+    trackEnv(UserInputService.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+           or input.UserInputType == Enum.UserInputType.Touch then
+            local pos = input.Position
+            -- spawn one mini petal that fades
+            local size = math.random(6, 12)
+            local color = PETAL_COLORS[math.random(1, #PETAL_COLORS)]
+            local p = makePetalFrame(trailFolder, size, color, 0.1)
+            p.Position = UDim2.fromOffset(pos.X + math.random(-8, 8), pos.Y + math.random(-8, 8))
+            p.ZIndex = 9997
+            local info = TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+            local t = TweenService:Create(p, info, {
+                Position = UDim2.fromOffset(pos.X + math.random(-30, 30), pos.Y + 40),
+                Rotation = math.random(-360, 360),
+                BackgroundTransparency = 1,
+            })
+            t:Play()
+            t.Completed:Connect(function() pcall(function() p:Destroy() end) end)
+        end
+    end))
+
+    -- random sparkles at random positions
+    task.spawn(function()
+        while sakuraGui.Parent do
+            task.wait(math.random(2, 6))
+            local sx = math.random(0, vw)
+            local sy = math.random(0, vh)
+            -- 4-point star sparkle
+            local sparkle = Instance.new("Frame")
+            sparkle.Name = "Sparkle"
+            sparkle.AnchorPoint = Vector2.new(0.5, 0.5)
+            sparkle.Position = UDim2.fromOffset(sx, sy)
+            sparkle.Size = UDim2.fromOffset(4, 4)
+            sparkle.BackgroundColor3 = Color3.fromRGB(255, 245, 220)
+            sparkle.BorderSizePixel = 0
+            sparkle.ZIndex = 9996
+            sparkle.Parent = sakuraGui
+            local c = Instance.new("UICorner")
+            c.CornerRadius = UDim.new(1, 0)
+            c.Parent = sparkle
+
+            local info = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+            local t = TweenService:Create(sparkle, info, {
+                Size = UDim2.fromOffset(20, 20),
+                BackgroundTransparency = 1,
+            })
+            t:Play()
+            t.Completed:Connect(function() pcall(function() sparkle:Destroy() end) end)
+        end
+    end)
+
+    -- animate the Rayfield window: resize smaller, entrance, idle drift, rotation wobble
     task.spawn(function()
         local rf, winFrame = nil, nil
-        for _ = 1, 40 do
+        for _ = 1, 60 do
             rf, winFrame = findRayfieldWindow()
             if winFrame then break end
             task.wait(0.1)
         end
         if not winFrame then return end
 
-        -- entrance: scale + fade + slight rotation wobble
+        -- shrink the window: target ~70% of original size, centered
+        task.wait(0.2) -- let rayfield settle
         local origSize = winFrame.Size
         local origPos = winFrame.Position
-        winFrame.Size = UDim2.new(origSize.X.Scale, origSize.X.Offset * 0.85, origSize.Y.Scale, origSize.Y.Offset * 0.85)
-        winFrame.Position = UDim2.new(origPos.X.Scale, origPos.X.Offset, origPos.Y.Scale, origPos.Y.Offset + 30)
+        local origAbsSize = winFrame.AbsoluteSize
+        local targetW = math.floor(origAbsSize.X * 0.7)
+        local targetH = math.floor(origAbsSize.Y * 0.7)
+
+        -- compute center
+        local centerX = winFrame.AbsolutePosition.X + origAbsSize.X / 2
+        local centerY = winFrame.AbsolutePosition.Y + origAbsSize.Y / 2
+
+        -- set anchor to center, reposition
         winFrame.AnchorPoint = Vector2.new(0.5, 0.5)
-        local cx = winFrame.AbsolutePosition.X + winFrame.AbsoluteSize.X / 2
-        local cy = winFrame.AbsolutePosition.Y + winFrame.AbsoluteSize.Y / 2
-        winFrame.Position = UDim2.fromOffset(cx, cy)
+        winFrame.Size = UDim2.fromOffset(targetW, targetH)
+        winFrame.Position = UDim2.fromOffset(centerX, centerY)
+
+        -- entrance animation: scale up from 0.6 with back easing
+        local startSize = UDim2.fromOffset(math.floor(targetW * 0.6), math.floor(targetH * 0.6))
+        local endSize = UDim2.fromOffset(targetW, targetH)
+        winFrame.Size = startSize
+        winFrame.Rotation = -3
+        winFrame.Position = UDim2.fromOffset(centerX, centerY + 40)
 
         local entranceInfo = TweenInfo.new(0.9, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
         local entrance = TweenService:Create(winFrame, entranceInfo, {
-            Size = origSize,
-            Position = UDim2.fromOffset(cx, cy - 15),
+            Size = endSize,
+            Position = UDim2.fromOffset(centerX, centerY),
             Rotation = 0,
         })
-        winFrame.Rotation = -2
         entrance:Play()
 
-        -- idle drift: gentle figure-8 via RunService heartbeat
+        -- idle drift: figure-8 + rotation wobble via RenderStepped
         local t0 = tick()
         trackEnv(RunService.RenderStepped:Connect(function()
             if not winFrame or not winFrame.Parent then return end
             local t = tick() - t0
-            local dx = math.sin(t * 0.6) * 6
+            local dx = math.sin(t * 0.6) * 5
             local dy = math.sin(t * 0.3) * 4
-            winFrame.Position = UDim2.fromOffset(cx + dx, cy - 15 + dy)
+            local rot = math.sin(t * 0.4) * 0.8
+            winFrame.Position = UDim2.fromOffset(centerX + dx, centerY + dy)
+            winFrame.Rotation = rot
         end))
+
+        -- subtle glow pulse: find the stroke inside the window and pulse its transparency
+        task.spawn(function()
+            while winFrame and winFrame.Parent do
+                for _, d in ipairs(winFrame:GetDescendants()) do
+                    if d:IsA("UIStroke") then
+                        local orig = d.Transparency
+                        local info = TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+                        TweenService:Create(d, info, { Transparency = math.max(0, orig - 0.3) }):Play()
+                        task.wait(1.5)
+                        TweenService:Create(d, info, { Transparency = orig }):Play()
+                        task.wait(1.5)
+                    end
+                end
+                task.wait(0.5)
+            end
+        end)
     end)
 end
 
 buildSakuraEnv()
 
 -- ================================================================ sakura theme ====
--- Cherry blossom palette: warm dark plum base + cherry pink accents.
-local function seq(a, b) return ColorSequence.new(a, b) end
-
 local SakuraTheme = {
-    -- Window & shape
     CornerRoundness = UDim.new(0, 14),
     PillCornerRadius = UDim.new(0, 8),
     ElementCornerRadius = UDim.new(0, 10),
@@ -627,58 +827,48 @@ local SakuraTheme = {
     LiveAnimation = true,
     SurfaceStroke = Color3.fromRGB(61, 42, 48),
 
-    -- Text
-    ContentColor = Color3.fromRGB(240, 224, 228),    -- warm off-white element text
-    TitlingColor = Color3.fromRGB(255, 157, 190),    -- bright petal pink titles
+    ContentColor = Color3.fromRGB(240, 224, 228),
+    TitlingColor = Color3.fromRGB(255, 157, 190),
     ElementTextHoverColor = Color3.fromRGB(255, 183, 197),
     ActionColor = Color3.fromRGB(255, 183, 197),
 
-    -- Tabs
-    TabColor = Color3.fromRGB(255, 183, 197),         -- soft petal pink tab text
+    TabColor = Color3.fromRGB(255, 183, 197),
     TabBackground = seq(Color3.fromRGB(255, 107, 157), Color3.fromRGB(255, 157, 190)),
     TabStroke = seq(Color3.fromRGB(255, 183, 197), Color3.fromRGB(255, 143, 171)),
 
-    -- Elements
     ElementGradient = seq(Color3.fromRGB(42, 26, 32), Color3.fromRGB(51, 31, 38)),
     ElementStroke = Color3.fromRGB(74, 45, 56),
     ElementStrokeHover = Color3.fromRGB(106, 61, 72),
     ElementTransparency = 0,
     ElementStrokeTransparency = 0.15,
 
-    -- Accent (toggle on, slider glow, popup primary)
-    AccentColor = Color3.fromRGB(255, 107, 157),     -- cherry pink
+    AccentColor = Color3.fromRGB(255, 107, 157),
     AccentStroke = Color3.fromRGB(255, 157, 190),
-    AccentGlow = 0.35,
+    AccentGlow = 0.25,
 
-    -- Slider
     SliderBackground = Color3.fromRGB(42, 27, 34),
     SliderBackgroundHover = Color3.fromRGB(58, 37, 48),
     SliderProgress = seq(Color3.fromRGB(255, 107, 157), Color3.fromRGB(255, 183, 197)),
     SliderStroke = Color3.fromRGB(74, 45, 56),
     SliderHandle = Color3.fromRGB(255, 122, 171),
 
-    -- Toggle
     ToggleTrack = Color3.fromRGB(42, 27, 34),
     ToggleTrackTransparency = 0,
     ToggleKnobOff = Color3.fromRGB(106, 61, 72),
     ToggleKnobOffTransparency = 0,
     DarkToggleOverlay = false,
 
-    -- Dropdown
     DropdownHighlight = Color3.fromRGB(255, 107, 157),
 
-    -- Fields
     FieldBackground = Color3.fromRGB(42, 26, 32),
     FieldTransparency = 0,
     FieldGlow = Color3.fromRGB(255, 107, 157),
     PlaceholderColor = Color3.fromRGB(138, 106, 114),
 
-    -- Buttons
     NeutralButton = Color3.fromRGB(58, 37, 48),
     NeutralButtonHover = Color3.fromRGB(90, 53, 64),
     NeutralButtonStroke = Color3.fromRGB(90, 53, 64),
 
-    -- Errors
     ErrorColor = Color3.fromRGB(232, 74, 106),
     ErrorStrokeColor = Color3.fromRGB(255, 107, 157),
 }
@@ -686,7 +876,7 @@ local SakuraTheme = {
 -- ================================================================ window ====
 local Window = Rayfield:CreateWindow({
     name = "Auto Attack + Dodge",
-    subtitle = "Sakura Edition",
+    subtitle = "Sakura Mayhem",
     theme = SakuraTheme,
     sidebarLayout = true,
     showName = "Sakura",
@@ -698,10 +888,6 @@ local function notify(title, content, image)
     end)
 end
 
--- ================================================================ Combat tab ====
-local CombatTab = Window:CreateTab({ name = "Combat" })
-
--- Trigger a petal burst at the Rayfield window center on important changes.
 local function burstAtWindowCenter()
     local cam = Workspace.CurrentCamera
     if not cam then return end
@@ -709,11 +895,14 @@ local function burstAtWindowCenter()
     if winFrame and winFrame.AbsoluteSize.X > 0 then
         local cx = winFrame.AbsolutePosition.X + winFrame.AbsoluteSize.X / 2
         local cy = winFrame.AbsolutePosition.Y + winFrame.AbsoluteSize.Y / 2
-        petalBurst(cx, cy)
+        petalBurst(cx, cy, 18)
     else
-        petalBurst(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+        petalBurst(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2, 18)
     end
 end
+
+-- ================================================================ Combat tab ====
+local CombatTab = Window:CreateTab({ name = "Combat" })
 
 local autoToggleCtl
 autoToggleCtl = CombatTab:CreateToggle({
@@ -797,7 +986,6 @@ DodgeTab:CreateDropdown({
     options = { "Jump", "Strafe", "Both", "Backdash" },
     value = { dodgeMode },
     callback = function(selected)
-        -- single-mode callback receives a bare string
         if type(selected) == "string" then
             dodgeMode = selected
         elseif type(selected) == "table" then
@@ -867,7 +1055,6 @@ VisualsTab:CreateColorPicker({
     name = "Visual Color",
     value = visualColor,
     callback = function(c)
-        -- color picker may return Color3 or a table; handle both
         local color = c
         if type(c) == "table" and c.Color then color = c.Color end
         if color and typeof(color) == "Color3" then
@@ -902,16 +1089,16 @@ SettingsTab:CreateButton({
         clearHighlight()
         for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
         conns = {}
-        store.LG_AAD2_Conns = nil
         for _, c in ipairs(envConns) do pcall(function() c:Disconnect() end) end
         envConns = {}
+        store.LG_AAD3_Conns = nil
         pcall(function() if sakuraGui then sakuraGui:Destroy() end end)
         pcall(function() Window:Unload() end)
         killOld("Rayfield")
-        killOld("LG_AAD2_Ring")
-        killOld("LG_AAD2_Highlight")
+        killOld("LG_AAD3_Ring")
+        killOld("LG_AAD3_Highlight")
         killOld("LG_SakuraEnv")
-        print("[AAD2] Unloaded.")
+        print("[AAD3] Unloaded.")
     end,
 })
 
@@ -924,7 +1111,7 @@ if not combatReady then
     end)
 else
     task.delay(0.6, function()
-        notify("Sakura loaded", "Auto Attack + Auto Dodge ready. Press F / G to toggle.", "check")
+        notify("Sakura Mayhem loaded", "Auto Attack + Auto Dodge ready. Press F / G to toggle.", "check")
     end)
 end
 
@@ -975,4 +1162,4 @@ track(RunService.Heartbeat:Connect(function()
     })
 end))
 
-print("[AAD2] Loaded via Rayfield Gen2 (Sakura). Combat ready: " .. tostring(combatReady))
+print("[AAD3] Loaded via Rayfield Gen2 (Sakura Mayhem). Combat ready: " .. tostring(combatReady))
