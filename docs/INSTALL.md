@@ -10,15 +10,13 @@ The repository description contains the canonical loadstring. It points at
 `build/LiquidGlass.lua` on the `main` branch.
 
 ```lua
-local LiquidGlass = loadstring(game:HttpGet("YOUR_RAW_URL"))()
+local LiquidGlass = loadstring(game:HttpGet("https://raw.githubusercontent.com/flexyfresh8-prog/personallib/main/build/LiquidGlass.lua"))()
 ```
 
-> **Private repo note:** raw URLs of private repositories require your GitHub
-> token in the URL (`https://USERNAME:TOKEN@raw.githubusercontent.com/...`),
-> which is exactly what the repo description's loadstring embeds.
-> Anyone holding that URL can read the repo — treat it like a password and
-> rotate your token if it leaks. Making the repo **public** lets you use a
-> clean URL without any token.
+> **Security note:** this repository is public, so the loadstring URL is clean
+> and carries no token. Never embed a GitHub token in a loadstring URL you
+> share — anyone holding it gets your account access. If a token ever leaks,
+> revoke it at github.com/settings/tokens immediately.
 
 ## Option B — Roblox Studio (manual, no plugins)
 

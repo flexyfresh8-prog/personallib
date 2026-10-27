@@ -36,13 +36,12 @@ Translucent glass surfaces · fluid spring physics · specular light sweeps · a
 ### Loadstring (single file)
 
 ```lua
-local LiquidGlass = loadstring(game:HttpGet("YOUR_RAW_URL_TO_build/LiquidGlass.lua"))()
+local LiquidGlass = loadstring(game:HttpGet("https://raw.githubusercontent.com/flexyfresh8-prog/personallib/main/build/LiquidGlass.lua"))()
 ```
 
-> The canonical loadstring lives in this repository's description.
-> **Note:** this repo is private — the raw URL must include your GitHub token
-> (as the description's loadstring does). Treat that URL as a secret.
-> Making the repo public lets you drop the token from the URL.
+> The canonical loadstring also lives in this repository's description.
+> This URL is clean (no token) because the repository is public — never put
+> a GitHub token inside a loadstring URL you share.
 
 ### Roblox Studio (ModuleScript)
 
@@ -72,6 +71,9 @@ local Window = LiquidGlass:CreateWindow({
     Theme = "Midnight",          -- Midnight | Arctic | Aurora | Sunset | Obsidian
     AnimationStyle = "Spring",
 })
+
+-- A complete runnable example (Auto Target Attack) lives in
+-- examples/auto_target_attack.luau.
 
 local Tab = Window:CreateTab({ Name = "General", Icon = "⌂" })
 
