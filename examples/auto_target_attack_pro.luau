@@ -186,14 +186,52 @@ if type(Lib) ~= "table" or type(Lib.CreateWindow) ~= "function" then
 end
 log("[OK] Library ready")
 
-log("[4/4] Building PRO UI...")
-
 -- =============================================================== remotes =====
-local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
-assert(remotes, "[Auto Target Attack] ReplicatedStorage.Remotes not found")
-local attackRemote = remotes:WaitForChild("Attack", 10)
-assert(attackRemote, "[Auto Target Attack] Remotes.Attack not found")
-local swingRemote = remotes:WaitForChild("Swing", 5)
+log("[3.5/4] Locating game remotes...")
+
+local attackRemote = nil
+local swingRemote = nil
+local combatReady = false
+
+local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 6)
+if remotesFolder then
+    attackRemote = remotesFolder:WaitForChild("Attack", 6)
+    if attackRemote then
+        combatReady = true
+        log("[OK] Remotes.Attack found")
+        swingRemote = remotesFolder:WaitForChild("Swing", 2)
+        if swingRemote then
+            log("[OK] Remotes.Swing found")
+        else
+            log("[WARN] Remotes.Swing missing (will skip swing)")
+        end
+    else
+        log("[WARN] Remotes.Attack NOT found")
+        local names = {}
+        for _, c in ipairs(remotesFolder:GetChildren()) do
+            if #names >= 12 then break end
+            table.insert(names, c.Name)
+        end
+        log("Remotes has: " .. table.concat(names, ", "))
+    end
+else
+    log("[WARN] ReplicatedStorage.Remotes NOT found")
+    local names = {}
+    for _, c in ipairs(ReplicatedStorage:GetChildren()) do
+        if #names >= 12 then break end
+        table.insert(names, c.Name)
+    end
+    log("RS has: " .. table.concat(names, ", "))
+end
+
+if not combatReady then
+    log("")
+    log("COMBAT DISABLED: this game has no Remotes/Attack")
+    log("remote. UI will still load (themes etc.).")
+    log("Use this script in a game with Remotes.Attack.")
+end
+
+log("[4/4] Building PRO UI...")
 
 -- ================================================================== state ====
 local isToggled = false
@@ -313,6 +351,15 @@ local Window, Tab, VisualsTab, SettingsTab
 local autoToggleCtl = nil
 
 local function notifyState(on)
+    if not combatReady then
+        Window:Notify({
+            Title = "Combat unavailable",
+            Description = "No Remotes/Attack remote in this game.",
+            Type = "error",
+            Duration = 3,
+        })
+        return
+    end
     Window:Notify({
         Title = on and "Auto Attack ENABLED" or "Auto Attack DISABLED",
         Description = on and ("Targeting players within " .. tostring(range) .. " studs") or "Standby",
@@ -495,6 +542,17 @@ end
 
 log("[OK] Loaded! Closing this box...")
 
+if not combatReady then
+    pcall(function()
+        Window:Notify({
+            Title = "Combat unavailable",
+            Description = "This game has no Remotes/Attack remote — UI loaded, combat disabled.",
+            Type = "error",
+            Duration = 8,
+        })
+    end)
+end
+
 -- ================================================================ combat =====
 local function getEyePosition(character)
     if not character then
@@ -514,6 +572,10 @@ store.LG_AutoTargetConn = RunService.Heartbeat:Connect(function()
     end
 
     if not isToggled then
+        return
+    end
+
+    if not attackRemote then
         return
     end
 
