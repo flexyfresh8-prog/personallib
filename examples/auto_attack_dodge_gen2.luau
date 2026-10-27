@@ -16,10 +16,14 @@
       - Petal burst at window center on every toggle/hotkey.
 
     Tabs:
-      Combat:  Auto Attack (toggle + F hotkey), Range, Cooldown, Always Crit
-      Dodge:   Auto Dodge (toggle + G hotkey), Range, Mode, Cooldown
+      Combat:  Auto Attack (F), Kill Aura (H) + Max Targets, Target Priority
+               (Closest/Lowest HP/Strongest), Target Lock, Ignore Teammates,
+               Range, Cooldown, Burst Count, Charge, Sprint Attacks, Always
+               Crit, Humanize Timing + Jitter %, Aim Precision, Require
+               Facing, Auto Swing, Live Stats (Attacks Fired / Targets in Range)
+      Dodge:   Auto Dodge (G) + Range/Mode/Cooldown, Low HP Alert + Threshold
       Visuals: Target Highlight (Filled/Outline), Range Ring, Visual Color
-      Settings: Unload
+      Settings: Anti-AFK, Unload
 ]]
 
 local Players = game:GetService("Players")
@@ -98,6 +102,30 @@ local highlightOn = true
 local highlightMode = "Filled"
 local ringOn = false
 local visualColor = Color3.fromRGB(255, 122, 171)
+
+-- combat extras
+local killAura = false
+local maxTargets = 3
+local priority = "Closest"          -- Closest | Lowest HP | Strongest
+local targetLock = false
+local lockedTarget = nil
+local ignoreTeam = false
+local burstCount = 1
+local charge = 1
+local sprintAtk = false
+local humanize = false
+local jitter = 15                    -- % cooldown deviation
+local aimPrecision = 0               -- degrees of direction randomization
+local requireFacing = false
+local autoSwing = false
+local lastSwing = 0
+local currentDelay = 0.625
+local attacksFired = 0
+local lowHPAlert = false
+local lowHPThreshold = 30
+local lowHPNotified = false
+local antiAFK = false
+local antiAFKConn = nil
 
 -- ================================================================ visuals ====
 local ring = nil
@@ -907,17 +935,75 @@ local CombatTab = Window:CreateTab({ name = "Combat" })
 local autoToggleCtl
 autoToggleCtl = CombatTab:CreateToggle({
     name = "Auto Attack",
-    description = "Attacks the closest player in range",
+    description = "Attacks the best target in range",
     value = false,
     callback = function(state)
         autoAttackOn = state
-        if not state then clearHighlight() end
+        if not state then
+            clearHighlight()
+            lockedTarget = nil
+        end
         burstAtWindowCenter()
         notify(state and "Auto Attack ON" or "Auto Attack OFF",
                state and ("Targeting within " .. tostring(range) .. " studs") or "Standby",
                state and "check" or "circle")
     end,
 })
+
+CombatTab:CreateSection({ name = "TARGETING" })
+
+local killAuraCtl
+killAuraCtl = CombatTab:CreateToggle({
+    name = "Kill Aura",
+    description = "Attack ALL players in range, not just one",
+    value = false,
+    callback = function(s)
+        killAura = s
+        burstAtWindowCenter()
+        notify(s and "Kill Aura ON" or "Kill Aura OFF",
+               s and ("Hitting up to " .. tostring(maxTargets) .. " targets") or "Single target mode",
+               s and "swords" or "circle")
+    end,
+})
+
+CombatTab:CreateSlider({
+    name = "Max Targets",
+    description = "How many players Kill Aura hits per swing",
+    range = { 1, 8 },
+    value = maxTargets,
+    callback = function(v) maxTargets = math.floor(v) end,
+})
+
+CombatTab:CreateDropdown({
+    name = "Target Priority",
+    description = "Who gets attacked first",
+    options = { "Closest", "Lowest HP", "Strongest" },
+    value = { priority },
+    callback = function(selected)
+        local p = selected
+        if type(selected) == "table" then p = selected[1] end
+        if p then priority = p end
+    end,
+})
+
+CombatTab:CreateToggle({
+    name = "Target Lock",
+    description = "Stick to one target until it dies or leaves range",
+    value = false,
+    callback = function(s)
+        targetLock = s
+        if not s then lockedTarget = nil end
+    end,
+})
+
+CombatTab:CreateToggle({
+    name = "Ignore Teammates",
+    description = "Never attack players on your team",
+    value = false,
+    callback = function(s) ignoreTeam = s end,
+})
+
+CombatTab:CreateSection({ name = "ATTACK STYLE" })
 
 CombatTab:CreateSlider({
     name = "Attack Range (studs)",
@@ -931,13 +1017,94 @@ CombatTab:CreateSlider({
     name = "Attack Cooldown (s)",
     range = { 0.1, 2 },
     value = cooldown,
-    callback = function(v) cooldown = v end,
+    callback = function(v)
+        cooldown = v
+        currentDelay = v
+    end,
+})
+
+CombatTab:CreateSlider({
+    name = "Burst Count",
+    description = "Hits fired per swing cycle",
+    range = { 1, 4 },
+    value = burstCount,
+    callback = function(v) burstCount = math.floor(v) end,
+})
+
+CombatTab:CreateSlider({
+    name = "Charge",
+    description = "Attack charge value sent to the server",
+    range = { 0, 1 },
+    value = charge,
+    callback = function(v) charge = v end,
+})
+
+CombatTab:CreateToggle({
+    name = "Sprint Attacks",
+    description = "Send sprint=true with every attack",
+    value = false,
+    callback = function(s) sprintAtk = s end,
 })
 
 CombatTab:CreateToggle({
     name = "Always Crit",
     value = alwaysCrit,
     callback = function(s) alwaysCrit = s; burstAtWindowCenter() end,
+})
+
+CombatTab:CreateSection({ name = "STEALTH" })
+
+CombatTab:CreateToggle({
+    name = "Humanize Timing",
+    description = "Add random jitter to attack cooldown",
+    value = false,
+    callback = function(s) humanize = s end,
+})
+
+CombatTab:CreateSlider({
+    name = "Timing Jitter (%)",
+    description = "Max cooldown deviation when humanized",
+    range = { 0, 50 },
+    value = jitter,
+    callback = function(v) jitter = v end,
+})
+
+CombatTab:CreateSlider({
+    name = "Aim Precision",
+    description = "Degrees of random aim offset (0 = perfect)",
+    range = { 0, 15 },
+    value = aimPrecision,
+    callback = function(v) aimPrecision = v end,
+})
+
+CombatTab:CreateToggle({
+    name = "Require Facing",
+    description = "Only attack when your camera looks at the target",
+    value = false,
+    callback = function(s) requireFacing = s end,
+})
+
+CombatTab:CreateSection({ name = "EXTRAS" })
+
+CombatTab:CreateToggle({
+    name = "Auto Swing",
+    description = "Keep swinging even with no target in range",
+    value = false,
+    callback = function(s) autoSwing = s end,
+})
+
+CombatTab:CreateKeybind({
+    name = "Kill Aura Hotkey",
+    description = "Press to flip Kill Aura on/off",
+    value = Enum.KeyCode.H,
+    callback = function()
+        local newState = not killAura
+        killAura = newState
+        if killAuraCtl then pcall(function() killAuraCtl:Set(newState, true) end) end
+        burstAtWindowCenter()
+        notify(newState and "Kill Aura ON" or "Kill Aura OFF",
+               "Hotkey toggled", newState and "swords" or "circle")
+    end,
 })
 
 CombatTab:CreateKeybind({
@@ -948,11 +1115,29 @@ CombatTab:CreateKeybind({
         local newState = not autoAttackOn
         autoAttackOn = newState
         if autoToggleCtl then pcall(function() autoToggleCtl:Set(newState, true) end) end
-        if not newState then clearHighlight() end
+        if not newState then
+            clearHighlight()
+            lockedTarget = nil
+        end
         burstAtWindowCenter()
         notify(newState and "Auto Attack ON" or "Auto Attack OFF",
                "Hotkey toggled", newState and "check" or "circle")
     end,
+})
+
+CombatTab:CreateSection({ name = "LIVE STATS" })
+local statRow = CombatTab:CreateGroup()
+local statAttacks = statRow:CreateStat({
+    name = "Attacks Fired",
+    value = 0,
+    compact = true,
+    numberEasing = true,
+})
+local statTargets = statRow:CreateStat({
+    name = "Targets in Range",
+    value = 0,
+    compact = true,
+    numberEasing = true,
 })
 
 -- ================================================================ Dodge tab ====
@@ -1012,6 +1197,25 @@ DodgeTab:CreateKeybind({
         notify(newState and "Auto Dodge ON" or "Auto Dodge OFF",
                "Hotkey toggled", newState and "check" or "circle")
     end,
+})
+
+DodgeTab:CreateSection({ name = "DEFENSE" })
+
+DodgeTab:CreateToggle({
+    name = "Low HP Alert",
+    description = "Notify when your health drops below the threshold",
+    value = false,
+    callback = function(s)
+        lowHPAlert = s
+        lowHPNotified = false
+    end,
+})
+
+DodgeTab:CreateSlider({
+    name = "Low HP Threshold (%)",
+    range = { 10, 80 },
+    value = lowHPThreshold,
+    callback = function(v) lowHPThreshold = v end,
 })
 
 -- ================================================================ Visuals tab ====
@@ -1079,6 +1283,40 @@ else
     })
 end
 
+SettingsTab:CreateSection({ name = "UTILITY" })
+
+SettingsTab:CreateToggle({
+    name = "Anti-AFK",
+    description = "Prevents the 20-minute Roblox idle kick",
+    value = false,
+    callback = function(s)
+        antiAFK = s
+        if s then
+            local ok, VirtualUser = pcall(function()
+                return game:GetService("VirtualUser")
+            end)
+            if ok and VirtualUser then
+                antiAFKConn = player.Idled:Connect(function()
+                    pcall(function()
+                        VirtualUser:CaptureController()
+                        VirtualUser:ClickButton2(Vector2.new())
+                    end)
+                end)
+                notify("Anti-AFK ON", "Idle kick prevented", "check")
+            else
+                notify("Anti-AFK unavailable", "VirtualUser not found", "alert-triangle")
+                antiAFK = false
+            end
+        else
+            if antiAFKConn then
+                pcall(function() antiAFKConn:Disconnect() end)
+                antiAFKConn = nil
+            end
+            notify("Anti-AFK OFF", "Idle timer active again", "circle")
+        end
+    end,
+})
+
 SettingsTab:CreateButton({
     name = "Unload Script",
     description = "Stops everything and removes the UI",
@@ -1115,51 +1353,188 @@ else
     end)
 end
 
+-- ================================================================ combat engine ====
+local function computeDelay()
+    if not humanize then return cooldown end
+    local j = (jitter or 0) / 100
+    local d = cooldown * (1 + (math.random() * 2 - 1) * j)
+    return math.max(0.05, d)
+end
+
+local function jitterDir(dir, maxDeg)
+    if maxDeg <= 0 then return dir end
+    local rad = math.rad(maxDeg)
+    local yaw = (math.random() * 2 - 1) * rad
+    local pitch = (math.random() * 2 - 1) * rad
+    return (CFrame.Angles(pitch, yaw, 0) * CFrame.new(dir)).Position.Unit
+end
+
+local function isValidTargetEntry(op)
+    if op == player then return nil end
+    local char = op.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not (root and hum and hum.Health > 0) then return nil end
+    if ignoreTeam and op.Team ~= nil and op.Team == player.Team then return nil end
+    return { char = char, root = root, hum = hum }
+end
+
+local function collectTargets(eye, maxDist)
+    local list = {}
+    for _, op in ipairs(Players:GetPlayers()) do
+        local entry = isValidTargetEntry(op)
+        if entry then
+            local d = (entry.root.Position / 3 - eye).Magnitude
+            if d <= maxDist then
+                entry.dist = d
+                table.insert(list, entry)
+            end
+        end
+    end
+    if priority == "Lowest HP" then
+        table.sort(list, function(a, b) return a.hum.Health < b.hum.Health end)
+    elseif priority == "Strongest" then
+        table.sort(list, function(a, b) return a.hum.Health > b.hum.Health end)
+    else
+        table.sort(list, function(a, b) return a.dist < b.dist end)
+    end
+    return list
+end
+
+local function facingOK(eye, targetPos)
+    if not requireFacing then return true end
+    local cam = Workspace.CurrentCamera
+    if not cam then return true end
+    local toTarget = (targetPos - eye)
+    if toTarget.Magnitude < 1e-4 then return true end
+    return cam.CFrame.LookVector:Dot(toTarget.Unit) > 0.4
+end
+
+local function burstAttack(targetChar, targetRoot, eyePosition)
+    local targetPosition = targetRoot.Position / 3
+    if not facingOK(eyePosition, targetPosition) then return false end
+    local dir = targetPosition - eyePosition
+    if dir.Magnitude < 1e-4 then return false end
+    dir = jitterDir(dir.Unit, aimPrecision)
+
+    local bursts = math.clamp(math.floor(burstCount), 1, 4)
+    for i = 1, bursts do
+        attackCount = attackCount + 1
+        attacksFired = attacksFired + 1
+        if swingRemote then swingRemote:FireServer() end
+        attackRemote:FireServer(targetChar, {
+            sprint = sprintAtk,
+            charge = charge,
+            vt = Workspace:GetServerTimeNow(),
+            dir = dir,
+            eye = eyePosition,
+            t = Workspace.DistributedGameTime,
+            crit = alwaysCrit,
+            n = attackCount,
+        })
+        if i < bursts then task.wait(0.06) end
+    end
+    return true
+end
+
 -- ================================================================ loops ====
-track(RunService.Heartbeat:Connect(function()
+local statAccum = 0
+
+track(RunService.Heartbeat:Connect(function(dt)
     if ringOn then updateRing() end
     checkDodge()
 
-    if not autoAttackOn then return end
-    if not attackRemote then return end
-    if tick() - lastAttack < cooldown then return end
-
+    -- low HP alert
     local character = player.Character
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if lowHPAlert and humanoid and humanoid.Health > 0 then
+        local pct = humanoid.Health / math.max(1, humanoid.MaxHealth) * 100
+        if pct < lowHPThreshold and not lowHPNotified then
+            lowHPNotified = true
+            notify("LOW HEALTH", "You are below " .. tostring(math.floor(lowHPThreshold)) .. "% HP!", "alert-triangle")
+        elseif pct >= lowHPThreshold + 10 then
+            lowHPNotified = false
+        end
+    end
+
+    -- live stats (every 0.5s)
+    statAccum = statAccum + (dt or 0.016)
+    if statAccum >= 0.5 then
+        statAccum = 0
+        pcall(function() statAttacks:Set(attacksFired) end)
+        pcall(function()
+            local eye = getEyePosition(character)
+            local n = eye and #collectTargets(eye, range) or 0
+            statTargets:Set(n)
+        end)
+    end
+
+    -- auto swing (idle swing even with no target)
+    if autoAttackOn and autoSwing and swingRemote and tick() - lastSwing > math.max(0.4, currentDelay) then
+        lastSwing = tick()
+        pcall(function() swingRemote:FireServer() end)
+    end
+
+    if not autoAttackOn then return end
+    if not attackRemote then return end
+    if tick() - lastAttack < currentDelay then return end
+
     if not humanoid or humanoid.Health <= 0 then return end
 
     local eyePosition = getEyePosition(character)
     if not eyePosition then return end
 
-    local closestTarget, closestDistance = getClosestTarget(range)
-    if not closestTarget then
+    -- maintain target lock validity
+    if targetLock and lockedTarget then
+        local lhum = lockedTarget:FindFirstChildOfClass("Humanoid")
+        local lroot = lockedTarget:FindFirstChild("HumanoidRootPart")
+        local stillValid = lhum and lroot and lhum.Health > 0
+            and (lroot.Position / 3 - eyePosition).Magnitude <= range
+        if not stillValid then lockedTarget = nil end
+    end
+
+    local list = collectTargets(eyePosition, range)
+    if #list == 0 then
         clearHighlight()
+        lockedTarget = nil
         return
     end
 
-    if highlightOn then setTargetHighlight(closestTarget) end
-
-    local targetRoot = closestTarget:FindFirstChild("HumanoidRootPart")
-    if not targetRoot then return end
-
-    local targetPosition = targetRoot.Position / 3
-    local dir = targetPosition - eyePosition
-    if dir.Magnitude < 1e-4 then return end
+    if killAura then
+        -- hit up to maxTargets players per cycle
+        if targetLock and lockedTarget then
+            for _, t in ipairs(list) do
+                if t.char == lockedTarget then
+                    if highlightOn then setTargetHighlight(t.char) end
+                    burstAttack(t.char, t.root, eyePosition)
+                    break
+                end
+            end
+        else
+            local n = math.min(#list, math.max(1, math.floor(maxTargets)))
+            for i = 1, n do
+                local t = list[i]
+                if i == 1 and highlightOn then setTargetHighlight(t.char) end
+                burstAttack(t.char, t.root, eyePosition)
+                if i < n then task.wait(0.05) end
+            end
+            if targetLock then lockedTarget = list[1].char end
+        end
+    else
+        -- single target mode
+        local t = list[1]
+        if targetLock and lockedTarget then
+            for _, tt in ipairs(list) do
+                if tt.char == lockedTarget then t = tt break end
+            end
+        end
+        if highlightOn then setTargetHighlight(t.char) end
+        if targetLock then lockedTarget = t.char end
+        burstAttack(t.char, t.root, eyePosition)
+    end
 
     lastAttack = tick()
-    attackCount = attackCount + 1
-
-    if swingRemote then swingRemote:FireServer() end
-    attackRemote:FireServer(closestTarget, {
-        sprint = false,
-        charge = 1,
-        vt = Workspace:GetServerTimeNow(),
-        dir = dir.Unit,
-        eye = eyePosition,
-        t = Workspace.DistributedGameTime,
-        crit = alwaysCrit,
-        n = attackCount,
-    })
+    currentDelay = computeDelay()
 end))
 
 print("[AAD3] Loaded via Rayfield Gen2 (Sakura Mayhem). Combat ready: " .. tostring(combatReady))
