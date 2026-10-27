@@ -1,0 +1,21 @@
+{
+    "name": "personallib",
+    "tree": {
+        "$className": "DataModel",
+        "ReplicatedStorage": {
+            "$className": "ReplicatedStorage",
+            "LiquidGlass": {
+                "$path": "src/LiquidGlass"
+            }
+        },
+        "StarterPlayer": {
+            "$className": "StarterPlayer",
+            "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "DemoClient": {
+                    "$path": "src/Demo/DemoClient.client.luau"
+                }
+            }
+        }
+    }
+}
