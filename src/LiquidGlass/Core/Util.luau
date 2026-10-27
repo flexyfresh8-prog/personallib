@@ -217,7 +217,13 @@ end
 --====================================================================================
 
 function Util.GetGuiParent()
-        if RunService:IsRobloxStudio() then
+        -- NOTE: an earlier build called the non-existent method "IsRobloxStudio"
+        -- here, which crashes real clients. The real API is RunService:IsStudio.
+        -- pcall-wrap so even exotic environments can never crash window creation.
+        local okStudio, isStudio = pcall(function()
+                return RunService:IsStudio()
+        end)
+        if okStudio and isStudio then
                 local player = Players.LocalPlayer
                 if player then
                         return player:WaitForChild("PlayerGui")
