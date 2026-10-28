@@ -25,9 +25,12 @@
       AI Play: One-toggle hunting AI - picks the closest player, draws a live
                target line, routes around obstacles with PathfindingService
                (white path line bends as it recalculates), aimbot-locks the
-               camera on the target and walks you in with simulated WASD.
-               Move modes: WASD Keys (VirtualUser) / MoveVector (ControlModule)
-               / MoveTo, with automatic fallback if keys don't move you.
+               camera on the target and walks you in by replicating the
+               game's own movement state.
+               Move modes: MoveState (the game's own movement remote,
+               Cobalt-style replication packet: p/s/g/f/y/x/k/n/c/lt) /
+               MoveVector (ControlModule) / MoveTo, with automatic fallback if
+               the remote doesn't move you.
                Auto jump, stuck detection, stop distance, search range,
                repath delay, blacklist, live status panel, V hotkey.
       Dodge:   Auto Dodge (G) + Range/Mode + Variable Delay Min/Max, Low HP
@@ -148,7 +151,7 @@ local aiAimbot = true
 local aiAimPart = "Head"
 local aiAimSmooth = 0.3
 local aiPathfind = true
-local aiMoveMode = "WASD Keys"      -- WASD Keys | MoveVector | MoveTo
+local aiMoveMode = "MoveState"       -- MoveState remote | MoveVector | MoveTo
 local aiAutoJump = true
 local aiStopRange = 6
 local aiSearchRange = 150
@@ -614,7 +617,7 @@ local function buildBranchingTree(parent, baseX, baseY, scale)
     -- blossoms occasionally detach and float down
     task.spawn(function()
         while tree.Parent do
-            task.wait(math.random(4, 9))
+            task.wait(math.random(14, 28))
             if #blossoms > 0 then
                 local idx = math.random(1, #blossoms)
                 local src = blossoms[idx]
@@ -644,9 +647,9 @@ local function buildBranchingTree(parent, baseX, baseY, scale)
     return tree, branches
 end
 
--- petal burst at (x, y)
+-- petal burst at (x, y) — small, quick feedback puff
 local function petalBurst(x, y, count)
-    count = count or 14
+    count = count or 5
     if not sakuraGui or not sakuraGui.Parent then return end
     local burst = Instance.new("Folder")
     burst.Name = "Burst"
@@ -654,24 +657,24 @@ local function petalBurst(x, y, count)
 
     for i = 1, count do
         local angle = (i / count) * math.pi * 2 + math.random() * 0.4
-        local dist = math.random(60, 150)
+        local dist = math.random(35, 80)
         local tx = x + math.cos(angle) * dist
         local ty = y + math.sin(angle) * dist
-        local size = math.random(10, 22)
+        local size = math.random(8, 15)
         local color = PETAL_COLORS[math.random(1, #PETAL_COLORS)]
         local p = makePetalFrame(burst, size, color, 0.05)
         p.Position = UDim2.fromOffset(x, y)
         p.ZIndex = 9999
 
-        local info = TweenInfo.new(0.8 + math.random() * 0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local info = TweenInfo.new(0.6 + math.random() * 0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
         local t = TweenService:Create(p, info, {
             Position = UDim2.fromOffset(tx, ty),
-            Rotation = math.random(-720, 720),
+            Rotation = math.random(-360, 360),
             BackgroundTransparency = 1,
         })
         t:Play()
     end
-    task.delay(1.6, function() pcall(function() burst:Destroy() end) end)
+    task.delay(1.2, function() pcall(function() burst:Destroy() end) end)
 end
 
 -- find the Rayfield window frame (search for the named window frame inside Rayfield holder)
@@ -742,91 +745,23 @@ local function buildSakuraEnv()
         local t0 = tick()
         while bg.Parent do
             local t = tick() - t0
-            bgGrad.Rotation = (t * 8) % 360
-            -- subtle transparency pulse
-            bg.BackgroundTransparency = 0.94 + math.sin(t * 0.5) * 0.04
-            task.wait(0.1)
+            bgGrad.Rotation = (t * 2) % 360
+            task.wait(0.3)
         end
     end)
 
     -- tree in the lower-left
     local tree, branches = buildBranchingTree(sakuraGui, 20, vh - 240, 1)
 
-    -- 50 falling petals
+    -- a handful of falling petals
     local petalFolder = Instance.new("Folder")
     petalFolder.Name = "Petals"
     petalFolder.Parent = sakuraGui
-    for _ = 1, 50 do
+    for _ = 1, 14 do
         spawnFallingPetal(petalFolder, vw, vh, math.random(-50, vh))
     end
 
-    -- periodic wind gust: sudden burst of petals across screen
-    task.spawn(function()
-        while sakuraGui.Parent do
-            task.wait(math.random(8, 18))
-            for _ = 1, 20 do
-                spawnFallingPetal(petalFolder, vw, vh, -20)
-            end
-        end
-    end)
-
-    -- cursor trail: mini petals follow mouse/touch
-    local trailFolder = Instance.new("Folder")
-    trailFolder.Name = "CursorTrail"
-    trailFolder.Parent = sakuraGui
-
-    trackEnv(UserInputService.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement
-           or input.UserInputType == Enum.UserInputType.Touch then
-            local pos = input.Position
-            -- spawn one mini petal that fades
-            local size = math.random(6, 12)
-            local color = PETAL_COLORS[math.random(1, #PETAL_COLORS)]
-            local p = makePetalFrame(trailFolder, size, color, 0.1)
-            p.Position = UDim2.fromOffset(pos.X + math.random(-8, 8), pos.Y + math.random(-8, 8))
-            p.ZIndex = 9997
-            local info = TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-            local t = TweenService:Create(p, info, {
-                Position = UDim2.fromOffset(pos.X + math.random(-30, 30), pos.Y + 40),
-                Rotation = math.random(-360, 360),
-                BackgroundTransparency = 1,
-            })
-            t:Play()
-            t.Completed:Connect(function() pcall(function() p:Destroy() end) end)
-        end
-    end))
-
-    -- random sparkles at random positions
-    task.spawn(function()
-        while sakuraGui.Parent do
-            task.wait(math.random(2, 6))
-            local sx = math.random(0, vw)
-            local sy = math.random(0, vh)
-            -- 4-point star sparkle
-            local sparkle = Instance.new("Frame")
-            sparkle.Name = "Sparkle"
-            sparkle.AnchorPoint = Vector2.new(0.5, 0.5)
-            sparkle.Position = UDim2.fromOffset(sx, sy)
-            sparkle.Size = UDim2.fromOffset(4, 4)
-            sparkle.BackgroundColor3 = Color3.fromRGB(255, 245, 220)
-            sparkle.BorderSizePixel = 0
-            sparkle.ZIndex = 9996
-            sparkle.Parent = sakuraGui
-            local c = Instance.new("UICorner")
-            c.CornerRadius = UDim.new(1, 0)
-            c.Parent = sparkle
-
-            local info = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-            local t = TweenService:Create(sparkle, info, {
-                Size = UDim2.fromOffset(20, 20),
-                BackgroundTransparency = 1,
-            })
-            t:Play()
-            t.Completed:Connect(function() pcall(function() sparkle:Destroy() end) end)
-        end
-    end)
-
-    -- animate the Rayfield window: resize smaller, entrance, idle drift, rotation wobble
+    -- animate the Rayfield window: resize smaller, soft entrance, subtle glow
     task.spawn(function()
         local rf, winFrame = nil, nil
         for _ = 1, 60 do
@@ -868,32 +803,20 @@ local function buildSakuraEnv()
         })
         entrance:Play()
 
-        -- idle drift: figure-8 + rotation wobble via RenderStepped
-        local t0 = tick()
-        trackEnv(RunService.RenderStepped:Connect(function()
-            if not winFrame or not winFrame.Parent then return end
-            local t = tick() - t0
-            local dx = math.sin(t * 0.6) * 5
-            local dy = math.sin(t * 0.3) * 4
-            local rot = math.sin(t * 0.4) * 0.8
-            winFrame.Position = UDim2.fromOffset(centerX + dx, centerY + dy)
-            winFrame.Rotation = rot
-        end))
-
-        -- subtle glow pulse: find the stroke inside the window and pulse its transparency
+        -- very subtle glow pulse: breathe the window stroke a little
         task.spawn(function()
             while winFrame and winFrame.Parent do
                 for _, d in ipairs(winFrame:GetDescendants()) do
                     if d:IsA("UIStroke") then
                         local orig = d.Transparency
-                        local info = TweenInfo.new(1.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-                        TweenService:Create(d, info, { Transparency = math.max(0, orig - 0.3) }):Play()
-                        task.wait(1.5)
+                        local info = TweenInfo.new(3, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+                        TweenService:Create(d, info, { Transparency = math.max(0, orig - 0.12) }):Play()
+                        task.wait(3)
                         TweenService:Create(d, info, { Transparency = orig }):Play()
-                        task.wait(1.5)
+                        task.wait(3)
                     end
                 end
-                task.wait(0.5)
+                task.wait(1)
             end
         end)
     end)
@@ -1439,8 +1362,8 @@ AITab:CreateToggle({
 local aiMoveModeCtl
 aiMoveModeCtl = AITab:CreateDropdown({
     name = "Move Mode",
-    description = "WASD Keys = simulated key presses (auto-falls back to MoveVector if keys don't move you)",
-    options = { "WASD Keys", "MoveVector", "MoveTo" },
+    description = "MoveState = the game's own movement remote (auto-falls back to MoveVector)",
+    options = { "MoveState", "MoveVector", "MoveTo" },
     value = { aiMoveMode },
     callback = function(selected)
         local m = selected
@@ -1783,7 +1706,6 @@ track(RunService.Heartbeat:Connect(function(dt)
 end))
 
 -- ================================================================ AI Play engine ====
-local aiVirtualUser = nil
 local aiControls = nil
 local aiWasActive = false
 local aiForceRepath = false
@@ -1797,8 +1719,7 @@ local aiLastJump = 0
 local aiPulseT = 0
 local aiStatusText = nil
 local aiStatusTime = 0
-local aiKeyFallbackDone = false
-local keyState = { w = false, a = false, s = false, d = false }
+local aiMoveFallbackDone = false
 
 local targetAtt0, targetAtt1, targetBeam
 local pathAtt0, pathAtt1, pathBeam
@@ -1812,15 +1733,57 @@ local pathAgent = PathfindingService:CreatePath({
     WaypointSpacing = 4,
 })
 
-local function ensureVirtualUser()
-    if aiVirtualUser then return true end
-    local ok, vu = pcall(function() return game:GetService("VirtualUser") end)
-    if ok and vu then
-        aiVirtualUser = vu
-        pcall(function() aiVirtualUser:CaptureController() end)
-        return true
+-- MoveState: replicate movement through the game's own remote
+-- (ReplicatedStorage.Remotes.MoveState - Cobalt-style packet format)
+local moveStateRemote = nil
+local moveStateTried = false
+local msSeq = 0
+local msCounter = 0
+local msLastSend = 0
+
+local function ensureMoveState()
+    if moveStateTried then return moveStateRemote end
+    moveStateTried = true
+    pcall(function()
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        moveStateRemote = remotes and remotes:FindFirstChild("MoveState") or nil
+    end)
+    if moveStateRemote then
+        -- start counters from plausible session values (real client sends ~7/s)
+        local t = tonumber(Workspace.DistributedGameTime) or 0
+        msSeq = math.floor(t * 7)
+        msCounter = msSeq * 4 + 6300
     end
-    return false
+    return moveStateRemote
+end
+
+local function fireMoveState(dir, hum, root)
+    local ev = ensureMoveState()
+    if not ev then return false end
+    local now = tick()
+    if now - msLastSend < 0.1 then return true end   -- real client sends ~10/s
+    msLastSend = now
+    msSeq = msSeq + 1
+    msCounter = msCounter + 1
+    local atan2 = math.atan2 or math.atan  -- Luau prefers atan(y, x)
+    local yaw = math.deg(atan2(-dir.X, -dir.Z)) -- look-vector yaw in degrees
+    local grounded = true
+    pcall(function() grounded = hum.FloorMaterial ~= Enum.Material.Air end)
+    pcall(function()
+        ev:FireServer({
+            p = root.Position,
+            s = sprintAtk,
+            g = grounded == true,
+            f = 1,
+            y = yaw,
+            x = 0,
+            k = false,
+            n = msSeq,
+            c = msCounter,
+            lt = tonumber(Workspace.DistributedGameTime) or 0,
+        })
+    end)
+    return true
 end
 
 local function ensureControls()
@@ -1837,19 +1800,6 @@ local function ensureControls()
     return aiControls
 end
 
-local function pressKey(key, down)
-    if keyState[key] == down then return end
-    keyState[key] = down
-    if not aiVirtualUser then return end
-    pcall(function()
-        if down then
-            aiVirtualUser:SetKeyDown(key)
-        else
-            aiVirtualUser:SetKeyUp(key)
-        end
-    end)
-end
-
 local function camBasis()
     local cam = Workspace.CurrentCamera
     local look = (cam and cam.CFrame.LookVector) or Vector3.new(0, 0, -1)
@@ -1858,15 +1808,8 @@ local function camBasis()
     return flatLook, Vector3.new(-flatLook.Z, 0, flatLook.X)
 end
 
-local function releaseAllKeys()
-    pressKey("w", false)
-    pressKey("a", false)
-    pressKey("s", false)
-    pressKey("d", false)
-end
-
 local function aiStop()
-    releaseAllKeys()
+    msLastSend = 0
     if aiMoveMode == "MoveVector" and aiControls then
         pcall(function() aiControls:SetMoveVector(Vector3.zero) end)
     end
@@ -1876,6 +1819,17 @@ local function aiStop()
 end
 
 local function aiMove(dir)
+    if aiMoveMode == "MoveState" then
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if root and hum then
+            pcall(function() hum:Move(Vector3.new(dir.X, 0, dir.Z), false) end)
+            fireMoveState(dir, hum, root)
+            return
+        end
+        -- no character this frame: fall through
+    end
     if aiMoveMode == "MoveVector" then
         local ctl = ensureControls()
         if ctl then
@@ -1885,17 +1839,7 @@ local function aiMove(dir)
             pcall(function() ctl:SetMoveVector(Vector3.new(r, 0, -f)) end)
             return
         end
-        -- no ControlModule: fall through to key simulation
-    end
-    if aiMoveMode ~= "MoveTo" and ensureVirtualUser() then
-        local flatLook, flatRight = camBasis()
-        local f = dir:Dot(flatLook)
-        local r = dir:Dot(flatRight)
-        pressKey("w", f > 0.3)
-        pressKey("s", f < -0.3)
-        pressKey("d", r > 0.3)
-        pressKey("a", r < -0.3)
-        return
+        -- no ControlModule: fall through to MoveTo
     end
     -- MoveTo mode / final fallback
     local char = player.Character
@@ -2141,13 +2085,12 @@ local function aiStep()
                 aiStuck = 0
                 if aiAutoJump and myHum then pcall(function() myHum.Jump = true end) end
                 aiForceRepath = true
-                if aiMoveMode == "WASD Keys" and not aiKeyFallbackDone
-                    and (keyState.w or keyState.a or keyState.s or keyState.d) then
-                    -- keys pressed but nothing moved: switch strategy once
-                    aiKeyFallbackDone = true
+                if aiMoveMode == "MoveState" and not aiMoveFallbackDone then
+                    -- remote fired but nothing moved: switch strategy once
+                    aiMoveFallbackDone = true
                     aiMoveMode = "MoveVector"
                     if aiMoveModeCtl then pcall(function() aiMoveModeCtl:Set("MoveVector", true) end) end
-                    notify("AI Play", "WASD keys didn't move you - switched to MoveVector", "alert-triangle")
+                    notify("AI Play", "MoveState didn't move you - switched to MoveVector", "alert-triangle")
                 end
             end
         else
