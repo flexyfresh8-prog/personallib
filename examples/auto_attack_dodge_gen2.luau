@@ -27,10 +27,10 @@
                (white path line bends as it recalculates), aimbot-locks the
                camera on the target and walks you in by replicating the
                game's own movement state.
-               Move modes: MoveState (the game's own movement remote,
-               Cobalt-style replication packet: p/s/g/f/y/x/k/n/c/lt) /
-               MoveVector (ControlModule) / MoveTo, with automatic fallback if
-               the remote doesn't move you.
+               Move modes: Humanoid Walk (feeds your real input vector AND
+               walks the humanoid - the game's own client replicates its own
+               MoveState, nothing spoofed, nothing to flag) / Thumbstick Input
+               (ControlModule) / MoveTo, with automatic fallback.
                Auto jump, stuck detection, stop distance, search range,
                repath delay, blacklist, live status panel, V hotkey.
       Dodge:   Auto Dodge (G) + Range/Mode + Variable Delay Min/Max, Low HP
@@ -151,7 +151,7 @@ local aiAimbot = true
 local aiAimPart = "Head"
 local aiAimSmooth = 0.3
 local aiPathfind = true
-local aiMoveMode = "MoveState"       -- MoveState remote | MoveVector | MoveTo
+local aiMoveMode = "Humanoid Walk"   -- Humanoid Walk | Thumbstick Input | MoveTo
 local aiAutoJump = true
 local aiStopRange = 6
 local aiSearchRange = 150
@@ -1362,8 +1362,8 @@ AITab:CreateToggle({
 local aiMoveModeCtl
 aiMoveModeCtl = AITab:CreateDropdown({
     name = "Move Mode",
-    description = "MoveState = the game's own movement remote (auto-falls back to MoveVector)",
-    options = { "MoveState", "MoveVector", "MoveTo" },
+    description = "Humanoid Walk = safest, looks like real walking. No packets are spoofed.",
+    options = { "Humanoid Walk", "Thumbstick Input", "MoveTo" },
     value = { aiMoveMode },
     callback = function(selected)
         local m = selected
@@ -1720,6 +1720,7 @@ local aiPulseT = 0
 local aiStatusText = nil
 local aiStatusTime = 0
 local aiMoveFallbackDone = false
+local aiDriveActive = false          -- true only while we are actively driving the walk
 
 local targetAtt0, targetAtt1, targetBeam
 local pathAtt0, pathAtt1, pathBeam
@@ -1732,59 +1733,6 @@ local pathAgent = PathfindingService:CreatePath({
     AgentCanClimb = false,
     WaypointSpacing = 4,
 })
-
--- MoveState: replicate movement through the game's own remote
--- (ReplicatedStorage.Remotes.MoveState - Cobalt-style packet format)
-local moveStateRemote = nil
-local moveStateTried = false
-local msSeq = 0
-local msCounter = 0
-local msLastSend = 0
-
-local function ensureMoveState()
-    if moveStateTried then return moveStateRemote end
-    moveStateTried = true
-    pcall(function()
-        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-        moveStateRemote = remotes and remotes:FindFirstChild("MoveState") or nil
-    end)
-    if moveStateRemote then
-        -- start counters from plausible session values (real client sends ~7/s)
-        local t = tonumber(Workspace.DistributedGameTime) or 0
-        msSeq = math.floor(t * 7)
-        msCounter = msSeq * 4 + 6300
-    end
-    return moveStateRemote
-end
-
-local function fireMoveState(dir, hum, root)
-    local ev = ensureMoveState()
-    if not ev then return false end
-    local now = tick()
-    if now - msLastSend < 0.1 then return true end   -- real client sends ~10/s
-    msLastSend = now
-    msSeq = msSeq + 1
-    msCounter = msCounter + 1
-    local atan2 = math.atan2 or math.atan  -- Luau prefers atan(y, x)
-    local yaw = math.deg(atan2(-dir.X, -dir.Z)) -- look-vector yaw in degrees
-    local grounded = true
-    pcall(function() grounded = hum.FloorMaterial ~= Enum.Material.Air end)
-    pcall(function()
-        ev:FireServer({
-            p = root.Position,
-            s = sprintAtk,
-            g = grounded == true,
-            f = 1,
-            y = yaw,
-            x = 0,
-            k = false,
-            n = msSeq,
-            c = msCounter,
-            lt = tonumber(Workspace.DistributedGameTime) or 0,
-        })
-    end)
-    return true
-end
 
 local function ensureControls()
     if aiControls ~= nil then return aiControls end
@@ -1808,46 +1756,46 @@ local function camBasis()
     return flatLook, Vector3.new(-flatLook.Z, 0, flatLook.X)
 end
 
+-- stop driving. GUARDED: only sends one zero - never spams, so your own
+-- thumbstick/joystick keeps working when the AI is idle or standing still.
 local function aiStop()
-    msLastSend = 0
-    if aiMoveMode == "MoveVector" and aiControls then
-        pcall(function() aiControls:SetMoveVector(Vector3.zero) end)
+    if aiControls then pcall(function() aiControls:SetMoveVector(Vector3.zero) end) end
+    if aiDriveActive then
+        aiDriveActive = false
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then pcall(function() hum:Move(Vector3.zero, false) end) end
     end
-    local char = player.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if hum then pcall(function() hum:Move(Vector3.zero, false) end) end
 end
 
+-- Drive the walk WITHOUT spoofing anything: feed the ControlModule input
+-- vector (so input-reading client scripts see real movement) and walk the
+-- humanoid directly (guaranteed to work on iPad). The game's own client then
+-- replicates its own MoveState packets - we never touch that remote.
 local function aiMove(dir)
-    if aiMoveMode == "MoveState" then
-        local char = player.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if root and hum then
-            pcall(function() hum:Move(Vector3.new(dir.X, 0, dir.Z), false) end)
-            fireMoveState(dir, hum, root)
-            return
-        end
-        -- no character this frame: fall through
+    aiDriveActive = true
+    local flatLook, flatRight = camBasis()
+    local f = dir:Dot(flatLook)
+    local r = dir:Dot(flatRight)
+    -- feed the input channel (harmless if the game ignores it)
+    local ctl = ensureControls()
+    if ctl then
+        pcall(function() ctl:SetMoveVector(Vector3.new(r, 0, -f)) end)
     end
-    if aiMoveMode == "MoveVector" then
-        local ctl = ensureControls()
-        if ctl then
-            local flatLook, flatRight = camBasis()
-            local f = dir:Dot(flatLook)
-            local r = dir:Dot(flatRight)
-            pcall(function() ctl:SetMoveVector(Vector3.new(r, 0, -f)) end)
-            return
-        end
-        -- no ControlModule: fall through to MoveTo
-    end
-    -- MoveTo mode / final fallback
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if root and hum then
-        pcall(function() hum:Move(Vector3.new(dir.X, 0, dir.Z), false) end)
+    if not root or not hum then return end
+    if aiMoveMode == "Thumbstick Input" and ctl then
+        return -- input vector above is the whole driver
     end
+    if aiMoveMode == "MoveTo" then
+        pcall(function() hum:MoveTo(root.Position + Vector3.new(dir.X, 0, dir.Z) * 8) end)
+        return
+    end
+    -- Humanoid Walk (default): Heartbeat runs after the control scripts each
+    -- frame, so this looks exactly like a real walk to the server
+    pcall(function() hum:Move(Vector3.new(dir.X, 0, dir.Z), false) end)
 end
 
 local function destroyBeam(att0, att1, beam)
@@ -2085,12 +2033,12 @@ local function aiStep()
                 aiStuck = 0
                 if aiAutoJump and myHum then pcall(function() myHum.Jump = true end) end
                 aiForceRepath = true
-                if aiMoveMode == "MoveState" and not aiMoveFallbackDone then
-                    -- remote fired but nothing moved: switch strategy once
+                if aiMoveMode == "Humanoid Walk" and not aiMoveFallbackDone then
+                    -- direct walk blocked: switch strategy once
                     aiMoveFallbackDone = true
-                    aiMoveMode = "MoveVector"
-                    if aiMoveModeCtl then pcall(function() aiMoveModeCtl:Set("MoveVector", true) end) end
-                    notify("AI Play", "MoveState didn't move you - switched to MoveVector", "alert-triangle")
+                    aiMoveMode = "Thumbstick Input"
+                    if aiMoveModeCtl then pcall(function() aiMoveModeCtl:Set("Thumbstick Input", true) end) end
+                    notify("AI Play", "Walk drive didn't move you - switched to Thumbstick Input", "alert-triangle")
                 end
             end
         else
