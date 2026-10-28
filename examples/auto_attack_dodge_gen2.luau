@@ -18,8 +18,9 @@
     Tabs:
       Combat:  Auto Attack (F), Kill Aura (H) + Max Targets, Target Priority
                (Closest/Lowest HP/Strongest), Target Lock, Ignore Teammates,
-               Range, Cooldown, Burst Count, Charge, Sprint Attacks, Always
-               Crit, Humanize Timing + Jitter %, Aim Precision, Require
+               Range, Variable Delay Min/Max (every attack waits a RANDOM time
+               in between, 0.05s slider steps), Burst Count, Charge, Sprint
+               Attacks, Always Crit, Humanize Wobble, Aim Precision, Require
                Facing, Auto Swing, Live Stats (Attacks Fired / Targets in Range)
       AI Play: One-toggle hunting AI - picks the closest player, draws a live
                target line, routes around obstacles with PathfindingService
@@ -29,7 +30,8 @@
                / MoveTo, with automatic fallback if keys don't move you.
                Auto jump, stuck detection, stop distance, search range,
                repath delay, blacklist, live status panel, V hotkey.
-      Dodge:   Auto Dodge (G) + Range/Mode/Cooldown, Low HP Alert + Threshold
+      Dodge:   Auto Dodge (G) + Range/Mode + Variable Delay Min/Max, Low HP
+               Alert + Threshold
       Visuals: Target Highlight (Filled/Outline), Range Ring, Visual Color
       Settings: Anti-AFK, Unload
 ]]
@@ -98,12 +100,15 @@ local autoAttackOn = false
 local autoDodgeOn = false
 local lastAttack = 0
 local attackCount = 0
-local cooldown = 0.625
+local delayMin = 0.45                -- variable timing: every attack waits a
+local delayMax = 0.85                -- RANDOM time between delayMin and delayMax
 local range = 8
 local alwaysCrit = true
 
 local dodgeRange = 8
-local dodgeCooldown = 0.8
+local dodgeMin = 0.5                 -- variable dodge timing
+local dodgeMax = 1.2
+local dodgeDelayCur = 1.0            -- re-rolled after every dodge
 local dodgeMode = "Both"
 local lastDodge = 0
 
@@ -122,8 +127,7 @@ local ignoreTeam = false
 local burstCount = 1
 local charge = 1
 local sprintAtk = false
-local humanize = false
-local jitter = 15                    -- % cooldown deviation
+local wobble = true                  -- tiny extra randomness (about 6%) on top of min/max
 local aimPrecision = 0               -- degrees of direction randomization
 local requireFacing = false
 local autoSwing = false
@@ -149,6 +153,7 @@ local aiAutoJump = true
 local aiStopRange = 6
 local aiSearchRange = 150
 local aiRepath = 1
+local aiRepathCur = 1               -- re-rolled with jitter after every repath
 local aiTarget = nil                -- current AI target character
 local aiCleanup = nil               -- assigned by the AI engine at the bottom
 local blacklist = {}                -- lowercase username set
@@ -157,6 +162,24 @@ local function updateBlacklist(text)
     for token in string.gmatch(tostring(text or ""), "[^,%s]+") do
         blacklist[string.lower(token)] = true
     end
+end
+
+-- ================================================================ variable timing ====
+-- Every attack / dodge waits a RANDOM time between min and max (never a fixed
+-- 1s / 2s robot pattern). Wobble adds a tiny extra deviation on top.
+local function randDelay(lo, hi)
+    if lo > hi then lo, hi = hi, lo end
+    return lo + math.random() * (hi - lo)
+end
+local function computeDelay()
+    local d = randDelay(delayMin, delayMax)
+    if wobble then d = d * (1 + (math.random() * 2 - 1) * 0.06) end
+    return math.max(0.05, d)
+end
+local function computeDodgeDelay()
+    local d = randDelay(dodgeMin, dodgeMax)
+    if wobble then d = d * (1 + (math.random() * 2 - 1) * 0.06) end
+    return math.max(0.1, d)
 end
 
 -- ================================================================ visuals ====
@@ -304,7 +327,7 @@ end
 
 local function checkDodge()
     if not autoDodgeOn then return end
-    if tick() - lastDodge < dodgeCooldown then return end
+    if tick() - lastDodge < dodgeDelayCur then return end
     local character = player.Character
     local myRoot = character and character:FindFirstChild("HumanoidRootPart")
     local myHum = character and character:FindFirstChildOfClass("Humanoid")
@@ -328,6 +351,7 @@ local function checkDodge()
                     if approachSpeed > 6 and facingUs > 0 then
                         performDodge(otherRoot, myRoot, myHum)
                         lastDodge = tick()
+                        dodgeDelayCur = computeDodgeDelay()  -- roll a new random wait
                         return
                     end
                 end
@@ -1002,6 +1026,7 @@ CombatTab:CreateSlider({
     name = "Max Targets",
     description = "How many players Kill Aura hits per swing",
     range = { 1, 8 },
+    increment = 1,
     value = maxTargets,
     callback = function(v) maxTargets = math.floor(v) end,
 })
@@ -1041,17 +1066,34 @@ CombatTab:CreateSlider({
     name = "Attack Range (studs)",
     description = "How far the script searches for targets",
     range = { 1, 30 },
+    increment = 0.5,
     value = range,
     callback = function(v) range = v end,
 })
 
+CombatTab:CreateSection({ name = "TIMING" })
+
 CombatTab:CreateSlider({
-    name = "Attack Cooldown (s)",
-    range = { 0.1, 2 },
-    value = cooldown,
+    name = "Attack Delay Min (s)",
+    description = "Fastest gap between attacks (0.05s slider steps)",
+    range = { 0.05, 3 },
+    increment = 0.05,
+    value = delayMin,
     callback = function(v)
-        cooldown = v
-        currentDelay = v
+        delayMin = v
+        currentDelay = computeDelay()
+    end,
+})
+
+CombatTab:CreateSlider({
+    name = "Attack Delay Max (s)",
+    description = "Slowest gap - every attack waits a RANDOM time between min and max",
+    range = { 0.05, 5 },
+    increment = 0.05,
+    value = delayMax,
+    callback = function(v)
+        delayMax = v
+        currentDelay = computeDelay()
     end,
 })
 
@@ -1059,6 +1101,7 @@ CombatTab:CreateSlider({
     name = "Burst Count",
     description = "Hits fired per swing cycle",
     range = { 1, 4 },
+    increment = 1,
     value = burstCount,
     callback = function(v) burstCount = math.floor(v) end,
 })
@@ -1067,6 +1110,7 @@ CombatTab:CreateSlider({
     name = "Charge",
     description = "Attack charge value sent to the server",
     range = { 0, 1 },
+    increment = 0.05,
     value = charge,
     callback = function(v) charge = v end,
 })
@@ -1087,24 +1131,17 @@ CombatTab:CreateToggle({
 CombatTab:CreateSection({ name = "STEALTH" })
 
 CombatTab:CreateToggle({
-    name = "Humanize Timing",
-    description = "Add random jitter to attack cooldown",
-    value = false,
-    callback = function(s) humanize = s end,
-})
-
-CombatTab:CreateSlider({
-    name = "Timing Jitter (%)",
-    description = "Max cooldown deviation when humanized",
-    range = { 0, 50 },
-    value = jitter,
-    callback = function(v) jitter = v end,
+    name = "Humanize Wobble",
+    description = "Adds tiny extra randomness (about 6%) on top of the min/max range",
+    value = wobble,
+    callback = function(s) wobble = s end,
 })
 
 CombatTab:CreateSlider({
     name = "Aim Precision",
     description = "Degrees of random aim offset (0 = perfect)",
     range = { 0, 15 },
+    increment = 0.5,
     value = aimPrecision,
     callback = function(v) aimPrecision = v end,
 })
@@ -1193,6 +1230,7 @@ DodgeTab:CreateSlider({
     name = "Dodge Range (studs)",
     description = "Trigger distance from rushing enemies",
     range = { 3, 15 },
+    increment = 0.5,
     value = dodgeRange,
     callback = function(v) dodgeRange = v end,
 })
@@ -1212,10 +1250,27 @@ DodgeTab:CreateDropdown({
 })
 
 DodgeTab:CreateSlider({
-    name = "Dodge Cooldown (s)",
-    range = { 0.3, 3 },
-    value = dodgeCooldown,
-    callback = function(v) dodgeCooldown = v end,
+    name = "Dodge Delay Min (s)",
+    description = "Fastest re-dodge wait (0.1s slider steps)",
+    range = { 0.1, 5 },
+    increment = 0.1,
+    value = dodgeMin,
+    callback = function(v)
+        dodgeMin = v
+        dodgeDelayCur = computeDodgeDelay()
+    end,
+})
+
+DodgeTab:CreateSlider({
+    name = "Dodge Delay Max (s)",
+    description = "Slowest re-dodge wait - randomized between min and max",
+    range = { 0.1, 6 },
+    increment = 0.1,
+    value = dodgeMax,
+    callback = function(v)
+        dodgeMax = v
+        dodgeDelayCur = computeDodgeDelay()
+    end,
 })
 
 DodgeTab:CreateKeybind({
@@ -1246,6 +1301,7 @@ DodgeTab:CreateToggle({
 DodgeTab:CreateSlider({
     name = "Low HP Threshold (%)",
     range = { 10, 80 },
+    increment = 1,
     value = lowHPThreshold,
     callback = function(v) lowHPThreshold = v end,
 })
@@ -1366,6 +1422,7 @@ AITab:CreateSlider({
     name = "Aim Smoothness",
     description = "0.05 = heavy smoothing, 1 = instant snap",
     range = { 0.05, 1 },
+    increment = 0.05,
     value = aiAimSmooth,
     callback = function(v) aiAimSmooth = v end,
 })
@@ -1403,6 +1460,7 @@ AITab:CreateSlider({
     name = "Stop Distance (studs)",
     description = "Stop walking once this close to the target",
     range = { 3, 20 },
+    increment = 0.5,
     value = aiStopRange,
     callback = function(v) aiStopRange = v end,
 })
@@ -1411,14 +1469,16 @@ AITab:CreateSlider({
     name = "Search Range (studs)",
     description = "How far the AI looks for the closest player",
     range = { 50, 500 },
+    increment = 10,
     value = aiSearchRange,
     callback = function(v) aiSearchRange = math.floor(v) end,
 })
 
 AITab:CreateSlider({
     name = "Repath Delay (s)",
-    description = "Seconds between path recalculations",
-    range = { 0.3, 3 },
+    description = "Seconds between recalcs - auto-jittered every cycle",
+    range = { 0.2, 3 },
+    increment = 0.1,
     value = aiRepath,
     callback = function(v) aiRepath = v end,
 })
@@ -1545,13 +1605,6 @@ else
 end
 
 -- ================================================================ combat engine ====
-local function computeDelay()
-    if not humanize then return cooldown end
-    local j = (jitter or 0) / 100
-    local d = cooldown * (1 + (math.random() * 2 - 1) * j)
-    return math.max(0.05, d)
-end
-
 local function jitterDir(dir, maxDeg)
     if maxDeg <= 0 then return dir end
     local rad = math.rad(maxDeg)
@@ -1961,12 +2014,13 @@ end
 
 local function aiEnsurePath(myPos, tPos)
     local targetMoved = (not aiPathTarget) or ((tPos - aiPathTarget).Magnitude > 6)
-    local aged = (tick() - aiPathTime) > math.max(0.3, aiRepath)
+    local aged = (tick() - aiPathTime) > aiRepathCur
     local exhausted = (not aiWps) or (aiWpIndex >= #aiWps)
     if not (targetMoved or aged or exhausted or aiForceRepath) then return true end
     aiForceRepath = false
     local ok = pcall(function() pathAgent:ComputeAsync(myPos, tPos) end)
     aiPathTime = tick()
+    aiRepathCur = math.max(0.2, aiRepath * (0.75 + math.random() * 0.5))  -- variable repath timing
     aiPathTarget = tPos
     aiWps = nil
     aiWpIndex = 1
